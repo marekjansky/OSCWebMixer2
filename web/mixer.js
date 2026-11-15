@@ -6,12 +6,72 @@ const channelsDiv = document.getElementById('channels'),
 auxSelect = document.getElementById('aux'),
 panCheckbox = document.getElementById("panning"),
 auxiliaries = document.getElementById("auxiliaries"),
-snapshot = document.getElementById("snapshot");
+snapshot = document.getElementById("snapshot"),
+lockButton = document.getElementById("lock");
 
 let ws = null,
 timeout = null,
 channelInputs = null,
-panInputs = null;
+panInputs = null,
+lockedAux = null,
+unlockNeedsPassword = false;
+
+/**
+ * Read a value from localStorage. Storage can be unavailable (private mode, blocked site data).
+ * @param {string} key
+ * @returns {string|null}
+ */
+function storageGet(key)
+{
+	try
+	{
+		return localStorage.getItem(key);
+	}
+	catch(e)
+	{
+		return null;
+	}
+}
+
+/**
+ * Write a value to localStorage, ignoring failures.
+ * @param {string} key
+ * @param {string|null} value - null removes the key
+ */
+function storageSet(key, value)
+{
+	try
+	{
+		if(value === null)
+		{
+			localStorage.removeItem(key);
+		}
+		else
+		{
+			localStorage.setItem(key, value);
+		}
+	}
+	catch(e)
+	{
+		//ignore
+	}
+}
+
+/**
+ * A random ID for this browser, used by the server to remember device locks.
+ * Kept in localStorage, so clearing site data gives the device a new, unlocked identity.
+ */
+const deviceId = (function()
+{
+	let id = storageGet("deviceId");
+	if(!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id))
+	{
+		//crypto.getRandomValues works on plain http, unlike crypto.randomUUID
+		id = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, "0")).join("");
+		storageSet("deviceId", id);
+	}
+	return id;
+})();
 
 /**
  * Calculate the db value from the provided slider value.
@@ -115,10 +175,19 @@ function onMessage(e)
 	//Setup AUX and channels
 	if(json.config)
 	{
+		lockedAux = json.config.lock ? json.config.lock.aux : null;
+		unlockNeedsPassword = json.config.unlockNeedsPassword === true;
+		updateLockUI();
 		snapshot.innerText = json.config.snapshot;
 		buildAux(json.config.aux);
 		buildChannels(json.config.channels);
 		auxSelect.dispatchEvent(new Event("change"));
+		return;
+	}
+
+	if(json.address == "/Webmixer/Error")
+	{
+		alert(json.args[0]);
 		return;
 	}
 
@@ -220,11 +289,12 @@ function buildAux(options)
 
 	for(let option of options)
 	{
-		if(!option.enabled)
+		//a locked device always gets its aux, even if it has been hidden in the admin area
+		if(!option.enabled && option.channel != lockedAux)
 		{
-			if(localStorage.getItem("aux") == option.channel)
+			if(storageGet("aux") == option.channel)
 			{
-				localStorage.removeItem("aux");
+				storageSet("aux", null);
 			}
 			continue;
 		}
@@ -260,15 +330,76 @@ function buildAux(options)
 		auxiliaries.appendChild(button);
 	}
 
-	if(localStorage.getItem("aux"))
+	if(lockedAux !== null)
 	{
-		auxSelect.value = localStorage.getItem("aux");
+		auxSelect.value = lockedAux;
+		document.body.classList.remove("auxPicker");
+	}
+	else if(storageGet("aux") && auxSelect.querySelector('option[value="' + storageGet("aux") + '"]'))
+	{
+		auxSelect.value = storageGet("aux");
 	}
 	else
 	{
 		document.body.classList.add("auxPicker");
 	}
 }
+
+/**
+ * Reflect the lock state in the page
+ */
+function updateLockUI()
+{
+	const locked = lockedAux !== null;
+	document.body.classList.toggle("locked", locked);
+	auxSelect.disabled = locked;
+	lockButton.setAttribute("aria-pressed", locked ? "true" : "false");
+	lockButton.title = locked ? "Locked to this mix. Tap to unlock." : "Lock this device to the current mix";
+}
+
+/**
+ * Lock this device to the selected aux, or unlock it
+ */
+function lockClick(e)
+{
+	e.preventDefault();
+
+	if(!ws || ws.readyState != WebSocket.OPEN)
+	{
+		return;
+	}
+
+	if(lockedAux === null)
+	{
+		const option = auxSelect.options[auxSelect.selectedIndex];
+		if(!option)
+		{
+			return;
+		}
+		if(confirm('Lock this device to "' + option.text + '"? Other mixes will no longer be adjustable from here.'))
+		{
+			sendOSC("/Webmixer/Lock", [parseInt(option.value, 10)]);
+		}
+		return;
+	}
+
+	if(unlockNeedsPassword)
+	{
+		const password = prompt("Enter the admin password to unlock this device.");
+		if(password === null)
+		{
+			return;
+		}
+		sendOSC("/Webmixer/Unlock", [password]);
+		return;
+	}
+
+	if(confirm("Unlock this device?"))
+	{
+		sendOSC("/Webmixer/Unlock");
+	}
+}
+lockButton.addEventListener("click", lockClick);
 
 /**
  * open the auxiliaries picker when tapped
@@ -278,6 +409,10 @@ function auxMouseDown(e)
 {
 	e.preventDefault();
 	e.stopImmediatePropagation();
+	if(lockedAux !== null)
+	{
+		return;
+	}
 	document.body.classList.add("auxPicker");
 }
 auxSelect.addEventListener("mousedown", auxMouseDown);
@@ -288,7 +423,7 @@ auxSelect.addEventListener("mousedown", auxMouseDown);
  */
 function auxPickerClick(e)
 {
-	if(e.target.nodeName == "BUTTON")
+	if(e.target.nodeName == "BUTTON" && lockedAux === null)
 	{
 		auxSelect.value = e.target.value;
 		auxSelect.dispatchEvent(new Event("change"));
@@ -431,7 +566,7 @@ function noConnection()
  */
 function startWebsocket()
 {
-	ws = new WebSocket("ws://" + document.location.host);
+	ws = new WebSocket("ws://" + document.location.host + "/?device=" + encodeURIComponent(deviceId));
 	ws.onopen = onOpen;
 	ws.onmessage = onMessage;
 	ws.onclose = noConnection;
@@ -468,7 +603,7 @@ document.addEventListener("DOMContentLoaded", function()
 	auxSelect.addEventListener("change", function(e)
 	{
 		//save aux value so it can be restored
-		localStorage.setItem("aux", this.value);
+		storageSet("aux", this.value);
 
 		let option = this.getElementsByTagName("option")[this.selectedIndex];
 

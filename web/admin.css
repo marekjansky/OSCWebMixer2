@@ -592,3 +592,55 @@ button.down::before
 .preset-item:hover {
     background-color: #f5f5f5;
 }
+.device-list {
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	background: #fff;
+}
+
+.device-item {
+	padding: 12px 15px;
+	border-bottom: 1px solid #eee;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 20px;
+	flex-wrap: wrap;
+	border-left: 4px solid #ccc;
+}
+
+.device-item.connected {
+	border-left-color: #2a9d4b;
+}
+
+.device-item:last-child {
+	border-bottom: none;
+}
+
+.device-info {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.device-info .name {
+	font-weight: bold;
+	font-size: 1.1em;
+}
+
+.device-info .date {
+	font-size: 0.85em;
+	color: #666;
+}
+
+.device-actions {
+	display: flex;
+	gap: 10px;
+	align-items: center;
+}
+
+.device-actions select {
+	margin: 0;
+	width: auto;
+	padding: 5px;
+}

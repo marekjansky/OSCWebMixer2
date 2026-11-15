@@ -10,6 +10,7 @@ const configManager = require("./lib/config/configManager.js")
 const logger = require('./lib/logging/logger.js');
 const { getMainIPAddress, generateColour } = require('./lib/utils/utils.js');
 const { createAdminAuthMiddleware } = require('./lib/adminAuth.js');
+const deviceLock = require('./lib/deviceLocks.js');
 
 /**
  * Stores global configuration for webmixer
@@ -17,6 +18,12 @@ const { createAdminAuthMiddleware } = require('./lib/adminAuth.js');
 configManager.ensureConfigDirectoryExists();
 let config = configManager.getGlobalConfigOrDefault();
 let currentState = configManager.getCurrentStateOrDefault();
+
+/**
+ * Devices locked to a single aux, keyed by device ID. Persisted in config/devices.json.
+ * @type {Object<string, {aux: number, ip: string, lockedAt: string}>}
+ */
+let deviceLocks = configManager.getDeviceLocks();
 
 // Configure logger to use settings from global config
 logger.configure(config.debug, false);
@@ -120,10 +127,13 @@ const plugins = loadPlugins();
 
 /**
  * Build initial configuration for new connections
+ * @param {string|null} deviceId - the connecting device, used to report its lock state
  * @returns - the initial configuration
  */
-function buildConfig()
+function buildConfig(deviceId = null)
 {
+	const lock = deviceId ? deviceLocks[deviceId] : undefined;
+
 	let auxilaries = [];
 	if(cache.has("/Console/Aux_Outputs/modes") && currentState.auxes != undefined)
 	{
@@ -170,9 +180,99 @@ function buildConfig()
 		"config": {
 			channels: channels,
 			aux: auxilaries,
-			snapshot: currentSnapshotName
+			snapshot: currentSnapshotName,
+			lock: lock ? { aux: lock.aux } : null,
+			unlockNeedsPassword: Boolean(process.env.ADMIN_PASSWORD)
 		}
 	});
+}
+
+/**
+ * Persist the device locks and push fresh config to every socket of the affected device
+ * so its UI switches between locked and unlocked immediately.
+ * @param {string} deviceId
+ */
+function deviceLocksChanged(deviceId)
+{
+	configManager.saveDeviceLocks(deviceLocks);
+	for(const connection of connections)
+	{
+		if(connection.deviceId === deviceId && connection.readyState === webSocket.OPEN)
+		{
+			connection.send(buildConfig(deviceId));
+		}
+	}
+}
+
+/**
+ * Get the aux name from the cache
+ * @param {number} aux
+ * @returns {string}
+ */
+function auxName(aux)
+{
+	const cached = cache.get(`/Aux_Outputs/${aux}/Buss_Trim/name`);
+	return cached ? cached.args[0] : `Aux ${aux}`;
+}
+
+/**
+ * Handle lock/unlock requests sent by a webmixer device.
+ * @param {WebSocket} socket - the requesting socket
+ * @param {{address: string, args: any[]}} oscMsg
+ * @returns {boolean} true if the message was a lock message and has been handled
+ */
+function handleLockMessage(socket, oscMsg)
+{
+	if(oscMsg.address !== "/Webmixer/Lock" && oscMsg.address !== "/Webmixer/Unlock")
+	{
+		return false;
+	}
+
+	const deviceId = socket.deviceId;
+	const reply = (message) => socket.send(JSON.stringify({address: "/Webmixer/Error", args: [message]}));
+
+	if(!deviceId)
+	{
+		reply("This device has no ID. Reload the page and try again.");
+		return true;
+	}
+
+	if(oscMsg.address === "/Webmixer/Lock")
+	{
+		const aux = Number(Array.isArray(oscMsg.args) ? oscMsg.args[0] : undefined);
+		if(deviceLocks[deviceId])
+		{
+			reply("This device is already locked.");
+			return true;
+		}
+		if(!deviceLock.isValidAux(aux) || !cache.has(`/Aux_Outputs/${aux}/Buss_Trim/name`))
+		{
+			reply("Unknown aux.");
+			return true;
+		}
+		deviceLocks[deviceId] = {aux: aux, ip: socket.remoteIp, lockedAt: new Date().toISOString()};
+		logger.info(`Device ${deviceId} (${socket.remoteIp}) locked to aux ${aux} "${auxName(aux)}".`);
+		deviceLocksChanged(deviceId);
+		return true;
+	}
+
+	//unlock
+	if(!deviceLocks[deviceId])
+	{
+		deviceLocksChanged(deviceId); //already unlocked - just resync the client
+		return true;
+	}
+	const password = Array.isArray(oscMsg.args) ? oscMsg.args[0] : undefined;
+	if(!deviceLock.canSelfUnlock(process.env.ADMIN_PASSWORD, password))
+	{
+		logger.warn(`Rejected unlock attempt with wrong password from device ${deviceId} (${socket.remoteIp}).`);
+		reply("Wrong password.");
+		return true;
+	}
+	delete deviceLocks[deviceId];
+	logger.info(`Device ${deviceId} (${socket.remoteIp}) unlocked.`);
+	deviceLocksChanged(deviceId);
+	return true;
 }
 
 /**
@@ -501,6 +601,70 @@ function startServer()
 		}
 	});
 
+	//list locked and connected webmixer devices
+	app.get('/api/devices', requireAdminAuth, (req, res) => {
+		res.set("Cache-Control", "no-store");
+		let devices = new Map();
+
+		for(const [id, lock] of Object.entries(deviceLocks))
+		{
+			devices.set(id, {id: id, aux: lock.aux, auxName: auxName(lock.aux), ip: lock.ip, lockedAt: lock.lockedAt, connected: false});
+		}
+
+		for(const connection of connections)
+		{
+			if(!connection.deviceId || connection.readyState !== webSocket.OPEN)
+			{
+				continue;
+			}
+			const device = devices.get(connection.deviceId) || {id: connection.deviceId, aux: null, auxName: "", ip: connection.remoteIp, lockedAt: null};
+			device.connected = true;
+			device.ip = connection.remoteIp;
+			devices.set(connection.deviceId, device);
+		}
+
+		res.json({
+			devices: [...devices.values()],
+			unlockNeedsPassword: Boolean(process.env.ADMIN_PASSWORD)
+		});
+	});
+
+	//lock a device to an aux, or move a locked device to a different aux
+	app.post('/api/devices/:id/lock', requireAdminAuth, (req, res) => {
+		const id = req.params.id;
+		const aux = Number(req.body && req.body.aux);
+		if(!deviceLock.isValidDeviceId(id))
+		{
+			return res.status(400).json({success: false, message: "Invalid device ID."});
+		}
+		if(!deviceLock.isValidAux(aux) || !cache.has(`/Aux_Outputs/${aux}/Buss_Trim/name`))
+		{
+			return res.status(400).json({success: false, message: "Unknown aux."});
+		}
+		const connected = connections.find(c => c.deviceId === id);
+		deviceLocks[id] = {
+			aux: aux,
+			ip: connected ? connected.remoteIp : (deviceLocks[id] ? deviceLocks[id].ip : ""),
+			lockedAt: new Date().toISOString()
+		};
+		logger.info(`Admin locked device ${id} to aux ${aux} "${auxName(aux)}".`);
+		deviceLocksChanged(id);
+		res.json({success: true});
+	});
+
+	//remove a device lock
+	app.post('/api/devices/:id/unlock', requireAdminAuth, (req, res) => {
+		const id = req.params.id;
+		if(!deviceLocks[id])
+		{
+			return res.status(404).json({success: false, message: "Device is not locked."});
+		}
+		delete deviceLocks[id];
+		logger.info(`Admin unlocked device ${id}.`);
+		deviceLocksChanged(id);
+		res.json({success: true});
+	});
+
 	//provide the current config for the auxilaries
 	app.get('/aux', (req, res) => {
 		let auxDetails = [];
@@ -615,7 +779,7 @@ function startWebSocketServer() {
 	});
 
 	//when a webmixer user has connected
-	wss.on("connection", function(socket)
+	wss.on("connection", function(socket, req)
 	{
 		//only allow connections once everything has loaded
 		if(!loaded)
@@ -624,27 +788,23 @@ function startWebSocketServer() {
 			return;
 		}
 
+		//webmixer clients identify themselves with ?device=<id>. The admin page doesn't, so deviceId is null there.
+		socket.deviceId = deviceLock.deviceIdFromUrl(req && req.url);
+		socket.remoteIp = req && req.socket ? String(req.socket.remoteAddress || "").replace(/^::ffff:/, "") : "";
+
+		if(socket.deviceId && deviceLocks[socket.deviceId] && deviceLocks[socket.deviceId].ip !== socket.remoteIp)
+		{
+			deviceLocks[socket.deviceId].ip = socket.remoteIp;
+			configManager.saveDeviceLocks(deviceLocks);
+		}
+
 		//save the new connection
 		connections.push(socket);
-
-		//drop it from the list as soon as it closes, rather than waiting for the
-		//next broadcast to prune it
-		socket.on('close', function()
-		{
-			connections = connections.filter(function(c) { return c !== socket; });
-		});
-
-		//drop it from the list as soon as it closes, rather than waiting for the
-		//next broadcast to prune it
-		socket.on('close', function()
-		{
-			connections = connections.filter(function(c) { return c !== socket; });
-		});
 
 		logger.debug(`New WebSocket client connected. (Total: ${connections.length})`);
 
 		//send config for new connections
-		socket.send(buildConfig());
+		socket.send(buildConfig(socket.deviceId));
 
 		//when a message has been sent from a webmixer user
 		socket.on('message', function message(data)
@@ -659,7 +819,25 @@ function startWebSocketServer() {
 				logger.warn("Ignoring malformed message from socket client: " + data);
 				return;
 			}
+			if(!oscMsg || typeof oscMsg.address !== "string")
+			{
+				logger.warn("Ignoring message without an address from socket client: " + data);
+				return;
+			}
 			logger.debug("Message recieved from websocket client: " + JSON.stringify(oscMsg));
+
+			if(handleLockMessage(socket, oscMsg))
+			{
+				return;
+			}
+
+			//a locked device may only change its own aux
+			const lock = socket.deviceId ? deviceLocks[socket.deviceId] : undefined;
+			if(lock && !deviceLock.isAddressAllowedForAux(oscMsg.address, lock.aux))
+			{
+				logger.debug(`Blocked ${oscMsg.address} from device ${socket.deviceId} (locked to aux ${lock.aux}).`);
+				return;
+			}
 
 			//ignore messages that are already cached
 			if(cache.has(oscMsg.address) && JSON.stringify(cache.get(oscMsg.address)) == JSON.stringify(oscMsg))

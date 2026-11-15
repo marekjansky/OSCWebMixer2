@@ -27,6 +27,7 @@
 			<li><a href="#aux">Auxiliaries</a></li>
 			<li><a href="#channels">Channels</a></li>
 			<li><a href="#additional-devices">Additional Devices</a></li>
+			<li><a href="#devices">Locked Devices</a></li>
 			<li><a href="#presets">Presets</a></li>
 		</ul>
 	</nav>
@@ -78,6 +79,15 @@
 			<section id="additional-devices-content">
 				<div id="externalDevices"></div>
 				<button id="addExternal">+</button>
+			</section>
+
+			<section id="devices-content">
+				<div class="tips">Webmixer devices can be locked to a single mix with the padlock button in the mixer, so they can't change anyone else's mix. Locks can be changed or removed here.</div>
+				<p id="devices-password-warning" class="notice" hidden>No <code>ADMIN_PASSWORD</code> is set, so anyone can unlock a device from the mixer and anyone can open this admin area. Set <code>ADMIN_PASSWORD</code> before starting the server to make locks stick.</p>
+				<div class="button-row">
+					<button type="button" id="refresh-devices">Refresh</button>
+				</div>
+				<div id="device-list" class="device-list"></div>
 			</section>
 
 			<section id="presets-content">

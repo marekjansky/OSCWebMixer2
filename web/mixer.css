@@ -575,3 +575,38 @@ label.pan
 	margin-bottom: auto;
 }
 
+
+/*
+	Device lock button (top right of the header)
+*/
+#lock
+{
+	width: 44px;
+	height: 44px;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	cursor: pointer;
+	opacity: .6;
+	/* open padlock */
+	background: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2'%20stroke-linecap='round'%3E%3Crect%20x='5'%20y='11'%20width='14'%20height='10'%20rx='2'/%3E%3Cpath%20d='M8%2011V7a4%204%200%200%201%207.7-1.5'/%3E%3C/svg%3E") center / 22px no-repeat;
+}
+
+#lock[aria-pressed="true"]
+{
+	opacity: 1;
+	/* closed padlock */
+	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2'%20stroke-linecap='round'%3E%3Crect%20x='5'%20y='11'%20width='14'%20height='10'%20rx='2'%20fill='%23FFF'/%3E%3Cpath%20d='M8%2011V7a4%204%200%200%201%208%200v4'/%3E%3C/svg%3E");
+}
+
+/* a locked device can't open the aux picker */
+.locked .selectLabel
+{
+	border-color: transparent;
+	padding-right: 8px;
+}
+
+.locked .selectLabel:after
+{
+	display: none;
+}

@@ -938,3 +938,157 @@ async function deletePreset(event) {
 	}
 }
 
+
+
+/**
+ * Locked devices
+ */
+const deviceList = document.getElementById("device-list"),
+devicesPasswordWarning = document.getElementById("devices-password-warning");
+
+/**
+ * Build a single device row
+ * @param {{id: string, aux: number|null, auxName: string, ip: string, lockedAt: string|null, connected: boolean}} device
+ * @param {{name: string}[]} auxes - the auxes from /aux
+ * @returns {HTMLElement}
+ */
+function createDeviceRow(device, auxes)
+{
+	const row = document.createElement("div");
+	row.className = "device-item";
+
+	const info = document.createElement("div");
+	info.className = "device-info";
+
+	const name = document.createElement("span");
+	name.className = "name";
+	name.textContent = device.aux ? "Locked to " + device.aux + ": " + device.auxName : "Not locked";
+	info.appendChild(name);
+
+	const details = document.createElement("span");
+	details.className = "date";
+	let detailText = (device.connected ? "Connected" : "Offline") + " · " + (device.ip || "unknown IP") + " · ID " + device.id.slice(0, 8);
+	if(device.lockedAt)
+	{
+		const date = new Date(device.lockedAt);
+		detailText += " · since " + date.toLocaleDateString() + ", " + date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+	}
+	details.textContent = detailText;
+	info.appendChild(details);
+
+	row.classList.toggle("connected", device.connected);
+	row.appendChild(info);
+
+	const actions = document.createElement("div");
+	actions.className = "device-actions";
+
+	const select = document.createElement("select");
+	for(const [index, aux] of auxes.entries())
+	{
+		const option = document.createElement("option");
+		option.value = index + 1;
+		option.textContent = (index + 1) + ": " + aux.name;
+		select.appendChild(option);
+	}
+	if(device.aux)
+	{
+		select.value = device.aux;
+	}
+	actions.appendChild(select);
+
+	const lock = document.createElement("button");
+	lock.type = "button";
+	lock.textContent = device.aux ? "Change" : "Lock";
+	lock.addEventListener("click", () => deviceAction(device.id, "lock", { aux: parseInt(select.value, 10) }));
+	actions.appendChild(lock);
+
+	if(device.aux)
+	{
+		const unlock = document.createElement("button");
+		unlock.type = "button";
+		unlock.className = "btn-delete";
+		unlock.textContent = "Unlock";
+		unlock.addEventListener("click", () => {
+			if(confirm("Unlock this device?"))
+			{
+				deviceAction(device.id, "unlock");
+			}
+		});
+		actions.appendChild(unlock);
+	}
+
+	row.appendChild(actions);
+	return row;
+}
+
+/**
+ * Lock or unlock a device
+ * @param {string} id - device ID
+ * @param {"lock"|"unlock"} action
+ * @param {object} body
+ */
+async function deviceAction(id, action, body = {})
+{
+	const response = await fetch("/api/devices/" + encodeURIComponent(id) + "/" + action, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(body)
+	});
+	if(!response.ok)
+	{
+		let message = "Request failed.";
+		try
+		{
+			message = (await response.json()).message || message;
+		}
+		catch(e)
+		{
+			//ignore
+		}
+		alert(message);
+	}
+	refreshDeviceList();
+}
+
+/**
+ * Load the list of locked and connected devices
+ */
+async function refreshDeviceList()
+{
+	try
+	{
+		const [devicesResponse, auxResponse] = await Promise.all([
+			fetch("/api/devices", { cache: "no-store" }),
+			fetch("/aux", { cache: "no-store" })
+		]);
+		const { devices, unlockNeedsPassword } = await devicesResponse.json();
+		const auxes = await auxResponse.json();
+
+		devicesPasswordWarning.hidden = unlockNeedsPassword;
+
+		deviceList.innerHTML = "";
+		if(devices.length == 0)
+		{
+			deviceList.innerHTML = '<p class="notice">No webmixer devices connected or locked</p>';
+			return;
+		}
+
+		//locked first, then connected
+		devices.sort((a, b) => (b.aux ? 1 : 0) - (a.aux ? 1 : 0) || (b.connected ? 1 : 0) - (a.connected ? 1 : 0));
+		for(const device of devices)
+		{
+			deviceList.appendChild(createDeviceRow(device, auxes));
+		}
+	}
+	catch(err)
+	{
+		console.error("Failed to refresh devices:", err);
+	}
+}
+
+document.getElementById("refresh-devices").addEventListener("click", (e) => {
+	e.preventDefault();
+	refreshDeviceList();
+});
+document.querySelector('nav a[href="#devices"]').addEventListener("click", refreshDeviceList);
+refreshDeviceList();
