@@ -309,32 +309,66 @@ label.pan
 }
 
 /*
-	Each fader is a row: the slider, then a readout of its value on the right
-*/
-.faderRow
-{
-	display: flex;
-	align-items: center;
-	gap: 10px;
-}
+	Each fader has its value printed inside the track, on the right. The readout has two
+	copies of the text: white, and black clipped to where the white fill and thumb are,
+	so it stays readable at any position.
 
+	The slider is 10px wider than .fader (-5px margins) and its thumb is 44px, so the
+	thumb spans from v*(100% - 34px) - 5px to v*(100% - 34px) + 39px, where v is 0-1.
+*/
 .fader
 {
 	position: relative;
-	flex: 1;
-	min-width: 0;
-	isolation: isolate;
 }
 
-.faderRow output
+.fader output
 {
-	flex: none;
-	width: 56px;
-	text-align: right;
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: 44px;
+	pointer-events: none;
+	font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+	font-size: 22px;
+	font-weight: 700;
+	letter-spacing: -0.02em;
 	font-variant-numeric: tabular-nums;
-	font-size: 15px;
-	opacity: .85;
-	margin-top: 2px;
+	line-height: 1;
+}
+
+.fader output span
+{
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	padding-right: 14px;
+	color: #FFF;
+}
+
+.fader output span.dark
+{
+	color: #000;
+	clip-path: inset(0 calc(100% - (var(--v, 0) * (100% - 34px) + 39px)) 0 0);
+}
+
+label.pan .fader output span.dark
+{
+	clip-path: inset(0 calc(100% - max(var(--value, 50%), var(--v, 0.5) * (100% - 34px) + 39px)) 0 min(50%, var(--v, 0.5) * (100% - 34px) - 5px));
+}
+
+label.volume .fader output span::after
+{
+	content: "dB";
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0;
+	margin-left: 3px;
+	opacity: .75;
+	align-self: flex-end;
+	padding-bottom: 14px;
 }
 
 .fader:after
@@ -356,6 +390,7 @@ label.pan .fader:after
 	width: 44px;
 	background: #FFF;
 	position: absolute;
+	left: auto; /* .fader:after sets left: 0 */
 	right: 50%;
 	bottom: 0;
 	width: calc((var(--value) - 50%) * -1);
@@ -537,8 +572,7 @@ label.pan
 .panning #channels
 {
 	background: linear-gradient(90deg, rgba(80,80,80) 2px, transparent 2px);
-	/* centre of the fader, which ends before the 56px readout and 10px gap */
-	background-position: calc(50% - 33px) 0;
+	background-position: 50% 0;
 	background-repeat: repeat-y;
 	background-size: 2px;
 }

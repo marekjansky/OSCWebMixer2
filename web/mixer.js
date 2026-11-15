@@ -185,18 +185,26 @@ function formatPan(value)
 function updateSlider(slider, db)
 {
 	slider.parentNode.style.setProperty('--value', (slider.value * 100) + "%");
+	slider.parentNode.style.setProperty('--v', slider.value);
 
 	const readout = slider.closest("label").querySelector("output");
 	if(!readout)
 	{
 		return;
 	}
+	let text;
 	if(slider.classList.contains("panInput"))
 	{
-		readout.textContent = formatPan(slider.value);
-		return;
+		text = formatPan(slider.value);
 	}
-	readout.textContent = formatDb(db === undefined ? sliderToDb(slider.value) : db);
+	else
+	{
+		text = formatDb(db === undefined ? sliderToDb(slider.value) : db);
+	}
+	for(const layer of readout.children)
+	{
+		layer.textContent = text;
+	}
 }
 
 /**
@@ -674,10 +682,22 @@ function createFader(type, labelText, iconSrc, inputClass, value)
 	input.max = "1";
 	input.value = value;
 	fader.appendChild(input);
-	row.appendChild(fader);
 
+	//the value readout sits inside the fader track, on the right. It has a white layer and a
+	//dark layer that CSS clips to the white fill and thumb, so the text is readable over both.
 	let readout = document.createElement("output");
-	row.appendChild(readout);
+	for(const layer of ["light", "dark"])
+	{
+		let span = document.createElement("span");
+		span.className = layer;
+		if(layer == "dark")
+		{
+			span.setAttribute("aria-hidden", "true");
+		}
+		readout.appendChild(span);
+	}
+	fader.appendChild(readout);
+	row.appendChild(fader);
 
 	label.appendChild(row);
 
