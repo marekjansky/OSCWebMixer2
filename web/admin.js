@@ -1142,7 +1142,6 @@ function createGroup(id = newGroupId(), name = "", icon = "")
 	const nameField = document.createElement("input");
 	nameField.name = "groupName[]";
 	nameField.placeholder = "Group name, e.g. Drums";
-	nameField.required = true;
 	nameField.value = name;
 	nameField.addEventListener("input", refreshGroupSelects);
 	nameLabel.appendChild(nameField);
