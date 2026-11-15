@@ -11,8 +11,9 @@ lockButton = document.getElementById("lock");
 
 let ws = null,
 timeout = null,
-channelInputs = null,
-panInputs = null,
+channelInputs = new Map(), //channel number => volume slider
+panInputs = new Map(), //channel number => pan slider
+groupInputs = new Map(), //group id => group trim slider
 lockedAux = null,
 unlockNeedsPassword = false;
 
@@ -74,30 +75,149 @@ const deviceId = (function()
 })();
 
 /**
+ * Fader law: slider position (0-1) => dB, like a console fader. Fine control around 0 dB,
+ * the quiet end compressed at the bottom. Positions between points are interpolated linearly.
+ * Position 0 is -150 dB, which the desk treats as off.
+ */
+const FADER_LAW = [
+	[0, -150],
+	[0.10, -60],
+	[0.20, -40],
+	[0.30, -25],
+	[0.40, -15],
+	[0.50, -10],
+	[0.75, 0],
+	[0.90, 5],
+	[1, 10]
+];
+const MIN_DB = -150;
+const MAX_DB = 10;
+
+/**
+ * Interpolate along FADER_LAW
+ * @param {number} value - the input value
+ * @param {number} from - index into each law point to read the input from
+ * @param {number} to - index into each law point to produce the output from
+ * @returns {number}
+ */
+function faderLaw(value, from, to)
+{
+	const first = FADER_LAW[0], last = FADER_LAW[FADER_LAW.length - 1];
+	if(!(value > first[from]))
+	{
+		return first[to];
+	}
+	if(value >= last[from])
+	{
+		return last[to];
+	}
+	for(let i = 1; i < FADER_LAW.length; i++)
+	{
+		const a = FADER_LAW[i - 1], b = FADER_LAW[i];
+		if(value <= b[from])
+		{
+			return a[to] + (value - a[from]) / (b[from] - a[from]) * (b[to] - a[to]);
+		}
+	}
+	return last[to];
+}
+
+/**
  * Calculate the db value from the provided slider value.
- * @param {number} value - the value to calculate from.
- * - Should be between 0 and 1.
- * - Will return a value between -150 and 10
+ * @param {number} value - slider value between 0 and 1
+ * @returns {number} dB between -150 and +10
  */
 function sliderToDb(value)
 {
-	const val = ((Math.log(value * 100) / Math.log(100)) * 100) - 90;
-	if(val === -Infinity)
-	{
-		return -150;
-	}
-	return val;
+	return faderLaw(parseFloat(value), 0, 1);
 }
 
 /**
  * Calculate the value a slider should be from the provided db value.
- * This is the reverse of the formula in sliderToDb
- * @param {number} db - The db to calculate from
- * - between -90 and +10
+ * This is the reverse of sliderToDb.
+ * @param {number} db - dB between -150 and +10
+ * @returns {number} slider value between 0 and 1
  */
 function dbToSlider(db)
 {
-	return Math.pow(100, (db + 90) / 100) / 100;
+	return faderLaw(parseFloat(db), 1, 0);
+}
+
+/**
+ * Format a dB value for the readout next to a fader
+ * @param {number} db
+ * @returns {string}
+ */
+function formatDb(db)
+{
+	if(!(db > MIN_DB + 0.05))
+	{
+		return "-∞";
+	}
+	if(db <= -99.95)
+	{
+		return db.toFixed(0);
+	}
+	return (db > 0.05 ? "+" : "") + db.toFixed(1);
+}
+
+/**
+ * Format a pan value (0 = left, 0.5 = centre, 1 = right) for the readout next to a fader
+ * @param {number} value
+ * @returns {string}
+ */
+function formatPan(value)
+{
+	const pan = Math.round((parseFloat(value) - 0.5) * 200);
+	if(pan === 0)
+	{
+		return "C";
+	}
+	return (pan < 0 ? "L" : "R") + Math.abs(pan);
+}
+
+/**
+ * Update a slider's fill and readout.
+ * @param {HTMLInputElement} slider
+ * @param {number} [db] - the exact dB value when known (sliders snap to their step, so
+ * reading the dB back from the slider can be slightly off)
+ */
+function updateSlider(slider, db)
+{
+	slider.parentNode.style.setProperty('--value', (slider.value * 100) + "%");
+
+	const readout = slider.closest("label").querySelector("output");
+	if(!readout)
+	{
+		return;
+	}
+	if(slider.classList.contains("panInput"))
+	{
+		readout.textContent = formatPan(slider.value);
+		return;
+	}
+	readout.textContent = formatDb(db === undefined ? sliderToDb(slider.value) : db);
+}
+
+/**
+ * Set a slider from a dB value
+ * @param {HTMLInputElement} slider
+ * @param {number} db
+ */
+function setSliderDb(slider, db)
+{
+	slider.value = dbToSlider(db);
+	updateSlider(slider, db);
+}
+
+/**
+ * Get the aux number currently selected
+ * @returns {string|undefined}
+ */
+function selectedAux()
+{
+	const option = auxSelect.options[auxSelect.selectedIndex];
+	return option ? option.dataset.channel : undefined;
 }
 
 /**
@@ -108,9 +228,9 @@ function sliderChange(e)
 {
 	let sliderValue = parseFloat(this.value);
 
-	this.parentNode.style.setProperty('--value', (sliderValue * 100) + "%");
+	updateSlider(this);
 
-	if(!ws)
+	if(!ws || selectedAux() === undefined)
 	{
 		return;
 	}
@@ -127,7 +247,23 @@ function sliderChange(e)
 		parameter = "pan";
 	}
 
-	sendOSC("/Input_Channels/" + this.dataset.channel + "/Aux_Send/" + auxSelect.options[auxSelect.selectedIndex].dataset.channel + "/send_" + parameter, [sliderValue]);
+	sendOSC("/Input_Channels/" + this.dataset.channel + "/Aux_Send/" + selectedAux() + "/send_" + parameter, [sliderValue]);
+}
+
+/**
+ * callback for when a group trim fader moves
+ * @param {!Event} e - the input event
+ */
+function groupSliderChange(e)
+{
+	updateSlider(this);
+
+	if(!ws || selectedAux() === undefined)
+	{
+		return;
+	}
+
+	sendOSC("/Webmixer/Aux/" + selectedAux() + "/Group/" + this.dataset.group + "/level", [sliderToDb(this.value)]);
 }
 
 function sendOSC(address, args = [])
@@ -147,10 +283,19 @@ function sendOSC(address, args = [])
  */
 function requestValues()
 {
-	for(let i=1; i<=[...document.getElementsByClassName("volumeInput")].length; i++)
+	const aux = selectedAux();
+	if(aux === undefined)
 	{
-		sendOSC("/Input_Channels/" + i + "/Aux_Send/" + auxSelect.options[auxSelect.selectedIndex].value + "/send_level/?");
-		sendOSC("/Input_Channels/" + i + "/Aux_Send/" + auxSelect.options[auxSelect.selectedIndex].value + "/send_pan/?");
+		return;
+	}
+	for(const channel of channelInputs.keys())
+	{
+		sendOSC("/Input_Channels/" + channel + "/Aux_Send/" + aux + "/send_level/?");
+		sendOSC("/Input_Channels/" + channel + "/Aux_Send/" + aux + "/send_pan/?");
+	}
+	for(const group of groupInputs.keys())
+	{
+		sendOSC("/Webmixer/Aux/" + aux + "/Group/" + group + "/level/?");
 	}
 }
 
@@ -180,8 +325,13 @@ function onMessage(e)
 		updateLockUI();
 		snapshot.innerText = json.config.snapshot;
 		buildAux(json.config.aux);
-		buildChannels(json.config.channels);
+		buildChannels(json.config.channels, json.config.groups || []);
 		auxSelect.dispatchEvent(new Event("change"));
+		return;
+	}
+
+	if(typeof json.address !== "string")
+	{
 		return;
 	}
 
@@ -200,13 +350,10 @@ function onMessage(e)
 	let sendLevel = json.address.match(/^\/Input_Channels\/([0-9]+)\/Aux_Send\/([0-9]+)\/send_level$/);
 	if(sendLevel !== null)
 	{
-
-		if(sendLevel[2] == auxSelect.options[auxSelect.selectedIndex].dataset.channel)
+		const slider = channelInputs.get(sendLevel[1]);
+		if(sendLevel[2] == selectedAux() && slider)
 		{
-			//-90 to +10
-			let slider = channelInputs[sendLevel[1] - 1];
-			slider.value = dbToSlider(parseFloat(json.args[0]));
-			slider.parentNode.style.setProperty('--value', (slider.value * 100) + "%");
+			setSliderDb(slider, parseFloat(json.args[0]));
 		}
 	}
 
@@ -215,11 +362,22 @@ function onMessage(e)
 	if(sendPan !== null)
 	{
 		//0 to +1
-		if(sendPan[2] == auxSelect.options[auxSelect.selectedIndex].dataset.channel)
+		const slider = panInputs.get(sendPan[1]);
+		if(sendPan[2] == selectedAux() && slider)
 		{
-			let slider = panInputs[sendPan[1] - 1];
 			slider.value = json.args[0];
-			slider.parentNode.style.setProperty('--value', (slider.value * 100) + "%");
+			updateSlider(slider);
+		}
+	}
+
+	//update group trim
+	let groupLevel = json.address.match(/^\/Webmixer\/Aux\/([0-9]+)\/Group\/([A-Za-z0-9_-]+)\/level$/);
+	if(groupLevel !== null)
+	{
+		const slider = groupInputs.get(groupLevel[2]);
+		if(groupLevel[1] == selectedAux() && slider)
+		{
+			setSliderDb(slider, parseFloat(json.args[0]));
 		}
 	}
 
@@ -229,7 +387,7 @@ function onMessage(e)
 	{
 		for(let slider of document.querySelectorAll('input[data-channel="' + channelNameMatch[1] + '"]'))
 		{
-			slider.previousElementSibling.textContent = json.args[0];
+			slider.closest("label").querySelector(".name").textContent = json.args[0];
 		}
 	}
 
@@ -447,9 +605,10 @@ function tapSlider(e)
 }
 
 /**
- * Reset a channel to its default value.
- - Pan sliders will be set to 0.5
- - Volume sliders will be set to 0
+ * Reset a fader to its default value.
+ - Pan sliders will be set to centre
+ - Volume sliders will be set to off
+ - Group trims will be set to 0 dB (no trim)
  * @param {Event} e - The Tap or Click Event
  */
 function resetSlider(e)
@@ -464,16 +623,104 @@ function resetSlider(e)
 		e.target.value = 0.5;
 	}
 
+	if(e.target.classList.contains("groupInput"))
+	{
+		e.target.value = dbToSlider(0);
+	}
+
 	e.target.dispatchEvent(new Event("input"));
+}
+
+/**
+ * Build a fader: a label with an optional icon, the name, the slider and a value readout
+ * @param {string} type - "volume" or "pan"
+ * @param {string} labelText
+ * @param {string} iconSrc
+ * @param {string} inputClass
+ * @param {number} value - initial slider value
+ * @returns {{label: HTMLLabelElement, input: HTMLInputElement}}
+ */
+function createFader(type, labelText, iconSrc, inputClass, value)
+{
+	let label = document.createElement("label");
+	label.className = type;
+
+	if(iconSrc)
+	{
+		let icon = document.createElement("img");
+		icon.src = iconSrc;
+		icon.width = 22;
+		icon.height = 22;
+		icon.className = "icon";
+		label.appendChild(icon);
+	}
+
+	let name = document.createElement("span");
+	name.className = "name";
+	name.textContent = labelText;
+	label.appendChild(name);
+
+	let row = document.createElement("div");
+	row.className = "faderRow";
+
+	let fader = document.createElement("div");
+	fader.className = "fader";
+
+	let input = document.createElement("input");
+	input.type = "range";
+	input.className = inputClass;
+	input.step = "0.001";
+	input.min = "0";
+	input.max = "1";
+	input.value = value;
+	fader.appendChild(input);
+	row.appendChild(fader);
+
+	let readout = document.createElement("output");
+	row.appendChild(readout);
+
+	label.appendChild(row);
+
+	updateSlider(input);
+
+	return { label, input };
 }
 
 /**
  * Build channels html and add to the page
  * @param {!Array<Object>} channels - the channels to build
+ * @param {!Array<Object>} groups - the channel groups (shown as trim faders above the channels)
  */
-function buildChannels(channels)
+function buildChannels(channels, groups)
 {
 	channelsDiv.innerHTML = "";
+	channelInputs = new Map();
+	panInputs = new Map();
+	groupInputs = new Map();
+
+	if(groups.length > 0)
+	{
+		let heading = document.createElement("h2");
+		heading.className = "groupHeading";
+		heading.style.order = -2;
+		heading.textContent = "Groups";
+		channelsDiv.appendChild(heading);
+	}
+
+	for(let group of groups)
+	{
+		let wrap = document.createElement("div");
+		wrap.className = "group";
+		wrap.style.order = -1;
+
+		const { label, input } = createFader("volume", group.name, group.icon, "groupInput", dbToSlider(0));
+		input.dataset.group = group.id;
+		input.addEventListener("input", groupSliderChange);
+		groupInputs.set(group.id, input);
+
+		wrap.appendChild(label);
+		channelsDiv.appendChild(wrap);
+	}
 
 	for(let channel of channels)
 	{
@@ -494,48 +741,21 @@ function buildChannels(channels)
 
 		for(let type of ["volume", "pan"])
 		{
-			let label = document.createElement("label");
-			label.className = type;
-
-			if(channel.icon != "")
-			{
-				let icon = document.createElement("img");
-				icon.src = channel.icon;
-				icon.width = 22;
-				icon.height = 22;
-				icon.className = "icon";
-				label.appendChild(icon);
-			}
-
-			let name = document.createElement("span");
-			name.textContent = channel.label;
-			label.appendChild(name);
-
-			let input = document.createElement("input");
-			input.type = "range";
+			const { label, input } = createFader(type, channel.label, channel.icon, type == "volume" ? "volumeInput" : "panInput", type == "volume" ? 0 : 0.5);
 			input.dataset.channel = channel.channel;
-			input.className = type == "volume" ? "volumeInput" : "panInput";
-			input.step = "0.001";
-			input.min = "0";
-			input.max = "1";
-			input.value = type == "volume" ? "0" : "0.5";
-			label.appendChild(input);
-
+			input.addEventListener("input", sliderChange);
+			(type == "volume" ? channelInputs : panInputs).set(String(channel.channel), input);
 			wrap.appendChild(label);
 		}
 
 		channelsDiv.appendChild(wrap);
 	}
 
-	for(let slider of document.querySelectorAll(".volumeInput, .panInput"))
+	for(let slider of document.querySelectorAll(".volumeInput, .panInput, .groupInput"))
 	{
-		slider.addEventListener("input", sliderChange);
 		slider.addEventListener('touchstart', tapSlider);
 		slider.addEventListener('dblclick', resetSlider);
 	}
-
-	channelInputs = [...document.getElementsByClassName("volumeInput")];
-	panInputs = [...document.getElementsByClassName("panInput")];
 }
 
 /**
@@ -632,15 +852,19 @@ document.addEventListener("DOMContentLoaded", function()
 
 
 		//clear all current values
-		for(let channel of channelInputs)
+		for(let slider of channelInputs.values())
 		{
-			channel.value = 0;
-			channel.parentNode.style.setProperty('--value', (channel.value * 100) + "%");
+			slider.value = 0;
+			updateSlider(slider);
 		}
-		for(let channel of panInputs)
+		for(let slider of panInputs.values())
 		{
-			channel.value = 0.5;
-			channel.parentNode.style.setProperty('--value', (channel.value * 100) + "%");
+			slider.value = 0.5;
+			updateSlider(slider);
+		}
+		for(let slider of groupInputs.values())
+		{
+			setSliderDb(slider, 0);
 		}
 
 		//request all the channel values for the selected aux

@@ -11,6 +11,7 @@ const logger = require('./lib/logging/logger.js');
 const { getMainIPAddress, generateColour } = require('./lib/utils/utils.js');
 const { createAdminAuthMiddleware } = require('./lib/adminAuth.js');
 const deviceLock = require('./lib/deviceLocks.js');
+const groupTrim = require('./lib/groupTrim.js');
 
 /**
  * Stores global configuration for webmixer
@@ -50,6 +51,20 @@ let loaded = false;
  * @type {Map}
  */
 let cache = new Map();
+
+/**
+ * Current group trim fader level (dB) for each aux and group, keyed by "{aux}/{groupId}".
+ * Missing entries are at unity (0 dB).
+ * @type {Map<string, number>}
+ */
+let groupLevels = new Map();
+
+/**
+ * Unclamped send levels remembered after a group trim pushed a send past the floor/ceiling,
+ * keyed by send_level address. See lib/groupTrim.js.
+ * @type {Map<string, number>}
+ */
+let trimOvershoot = new Map();
 
 /**
  * Stores the name of the current snapshot
@@ -170,7 +185,8 @@ function buildConfig(deviceId = null)
 					channel: i + 1,
 					order: currentState.channels[i]?.displayOrder ?? i,
 					title: currentState.channels[i] ? currentState.channels[i].title : "",
-					icon: currentState.channels[i] ? currentState.channels[i].icon : ""
+					icon: currentState.channels[i] ? currentState.channels[i].icon : "",
+					group: currentState.channels[i]?.group ?? ""
 				});
 			}
 		}
@@ -181,6 +197,9 @@ function buildConfig(deviceId = null)
 			channels: channels,
 			aux: auxilaries,
 			snapshot: currentSnapshotName,
+			groups: (currentState.groups || [])
+				.filter(group => channels.some(channel => channel.enabled && channel.group === group.id))
+				.map(group => ({ id: group.id, name: group.name, icon: group.icon || "" })),
 			lock: lock ? { aux: lock.aux } : null,
 			unlockNeedsPassword: Boolean(process.env.ADMIN_PASSWORD)
 		}
@@ -276,6 +295,111 @@ function handleLockMessage(socket, oscMsg)
 }
 
 /**
+ * Send a message to every webmixer socket except one. Unlike broadcast() this doesn't go to
+ * the desk or external devices, so it's used for webmixer-only messages.
+ * @param {object} msg
+ * @param {WebSocket} except
+ */
+function sendToSockets(msg, except)
+{
+	const json = JSON.stringify(msg);
+	for(const connection of connections)
+	{
+		if(connection !== except && connection.readyState === webSocket.OPEN)
+		{
+			connection.send(json);
+		}
+	}
+}
+
+/**
+ * Handle group trim messages: /Webmixer/Aux/{aux}/Group/{groupId}/level [dB] and its /? query.
+ * Moving a group fader moves every member channel's send on that aux by the same amount.
+ * Any other /Webmixer/ address is dropped so it never reaches the desk.
+ * @param {WebSocket} socket - the sending socket
+ * @param {{address: string, args: any[]}} oscMsg
+ * @returns {boolean} true if the message was handled and needs no further processing
+ */
+function handleGroupMessage(socket, oscMsg)
+{
+	if(!oscMsg.address.startsWith("/Webmixer/"))
+	{
+		return false;
+	}
+
+	const parsed = groupTrim.parseGroupAddress(oscMsg.address);
+	if(!parsed || !(currentState.groups || []).some(group => group.id === parsed.groupId))
+	{
+		logger.debug(`Ignoring unknown webmixer message ${oscMsg.address}`);
+		return true;
+	}
+
+	const key = `${parsed.aux}/${parsed.groupId}`;
+	const address = groupTrim.groupAddress(parsed.aux, parsed.groupId);
+	const current = groupLevels.has(key) ? groupLevels.get(key) : groupTrim.UNITY_DB;
+
+	if(parsed.query)
+	{
+		socket.send(JSON.stringify({address: address, args: [current]}));
+		return true;
+	}
+
+	const level = groupTrim.clampDb(Array.isArray(oscMsg.args) ? oscMsg.args[0] : undefined);
+	const delta = level - current;
+	groupLevels.set(key, level);
+
+	//keep other devices on the same aux in sync
+	sendToSockets({address: address, args: [level]}, socket);
+
+	if(delta === 0)
+	{
+		return true;
+	}
+
+	for(const channel of groupTrim.groupMembers(currentState.channels, parsed.groupId))
+	{
+		const sendAddress = `/Input_Channels/${channel}/Aux_Send/${parsed.aux}/send_level`;
+		const cached = cache.get(sendAddress);
+		if(!cached || typeof cached.args[0] !== "number")
+		{
+			continue; //we don't know this send's level yet
+		}
+
+		const result = groupTrim.applyTrim(cached.args[0], trimOvershoot.get(sendAddress), delta);
+		if(result.virtualDb === null)
+		{
+			trimOvershoot.delete(sendAddress);
+		}
+		else
+		{
+			trimOvershoot.set(sendAddress, result.virtualDb);
+		}
+
+		let sendMsg = processPlugins({address: sendAddress, args: [result.sendDb]});
+		if(sendMsg === false)
+		{
+			continue;
+		}
+		maybeCacheResponse(sendMsg);
+		broadcast(sendMsg); //desk, external devices and every socket including the sender
+	}
+	return true;
+}
+
+/**
+ * A send level was moved by something other than a group trim, so forget any remembered
+ * overshoot for it.
+ * @param {string} address
+ */
+function forgetTrimOvershoot(address)
+{
+	if(trimOvershoot.size > 0 && address.endsWith("/send_level"))
+	{
+		trimOvershoot.delete(address);
+	}
+}
+
+/**
  * Start the main web server
  */
 function startServer()
@@ -294,7 +418,9 @@ function startServer()
 
 	// Tell express that we are expecting post data
 	app.use(express.urlencoded({
-		extended: true
+		extended: true,
+		//the admin form posts several fields per channel, which passes the default 1000 on big desks
+		parameterLimit: 10000
 	}));
 
 	app.use(express.json());
@@ -365,13 +491,28 @@ function startServer()
 			currentState.auxes = auxConfig;
 		}
 
+		//groupsSubmitted is always in the form, so an empty group list clears the groups
+		if(req.body.groupsSubmitted !== undefined)
+		{
+			const ids = Array.isArray(req.body.groupId) ? req.body.groupId : [];
+			currentState.groups = ids
+				.map((id, index) => ({
+					id: id,
+					name: (Array.isArray(req.body.groupName) && req.body.groupName[index]) || `Group ${index + 1}`,
+					icon: (Array.isArray(req.body.groupIcon) && req.body.groupIcon[index]) || ""
+				}))
+				.filter(group => groupTrim.isValidGroupId(group.id));
+		}
+		const groupIds = new Set((currentState.groups || []).map(group => group.id));
+
 		if(req.body.channelEnabled && req.body.channelOrder && req.body.channelIcon)
 		{
 			const channelConfig = req.body.channelEnabled.map((enabledValue, index) => ({
 				enabled: enabledValue === "true",
 				displayOrder: parseInt(req.body.channelOrder[index]) || index,
 				title: req.body.sectionTitle ? req.body.sectionTitle[index] : "",
-				icon: req.body.channelIcon ? req.body.channelIcon[index] : ""
+				icon: req.body.channelIcon ? req.body.channelIcon[index] : "",
+				group: req.body.channelGroup && groupIds.has(req.body.channelGroup[index]) ? req.body.channelGroup[index] : ""
 			}))
 			currentState.channels = channelConfig;
 		}
@@ -725,6 +866,7 @@ function startServer()
 				let order = i + 1;
 				let title = "";
 				let icon = "";
+				let group = currentState.channels?.[i]?.group ?? "";
 				if(currentState.channels && currentState.channels[i])
 				{
 					if(currentState.channels[i].enabled != undefined)
@@ -749,11 +891,17 @@ function startServer()
 					"name": cache.get(`/Input_Channels/${i+1}/Channel_Input/name`).args[0],
 					"order": order,
 					"title": title,
-					"icon": icon
+					"icon": icon,
+					"group": group
 				});
 			}
 		}
 		res.json(channelDetails);
+	});
+
+	//provide the configured channel groups
+	app.get('/groups', (req, res) => {
+		res.json(currentState.groups || []);
 	});
 
 	logger.info(`Web Server Ready. Please visit ${getServerURL()}/admin in a web browser to configure OSC Web Mixer.`);
@@ -839,6 +987,11 @@ function startWebSocketServer() {
 				return;
 			}
 
+			if(handleGroupMessage(socket, oscMsg))
+			{
+				return;
+			}
+
 			//ignore messages that are already cached
 			if(cache.has(oscMsg.address) && JSON.stringify(cache.get(oscMsg.address)) == JSON.stringify(oscMsg))
 			{
@@ -861,6 +1014,7 @@ function startWebSocketServer() {
 				return;
 			}
 
+			forgetTrimOvershoot(oscMsg.address);
 			maybeCacheResponse(oscMsg);
 
 			broadcast(oscMsg, this);
@@ -975,6 +1129,8 @@ function startOSC()
 		if(oscMsg.address == "/Console/Session/!")
 		{
 			cache.clear();
+			groupLevels.clear();
+			trimOvershoot.clear();
 			loaded = false;
 			closeAllWebsocketConnections();
 			fetchValues();
@@ -996,6 +1152,7 @@ function startOSC()
 
 		processSnapshotMsg(oscMsg);
 
+		forgetTrimOvershoot(oscMsg.address);
 		maybeCacheResponse(oscMsg);
 
 		if(!loaded)

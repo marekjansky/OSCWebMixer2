@@ -308,7 +308,36 @@ label.pan
 	-webkit-transform: translate3d(0, 0, 0);
 }
 
-label.volume:after
+/*
+	Each fader is a row: the slider, then a readout of its value on the right
+*/
+.faderRow
+{
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fader
+{
+	position: relative;
+	flex: 1;
+	min-width: 0;
+	isolation: isolate;
+}
+
+.faderRow output
+{
+	flex: none;
+	width: 56px;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	font-size: 15px;
+	opacity: .85;
+	margin-top: 2px;
+}
+
+.fader:after
 {
 	content: "";
 	height: 44px;
@@ -320,7 +349,7 @@ label.volume:after
 	z-index: -1;
 }
 
-label.pan:after
+label.pan .fader:after
 {
 	content: "";
 	height: 44px;
@@ -333,7 +362,7 @@ label.pan:after
 	z-index: -1;
 }
 
-label.pan:before
+label.pan .fader:before
 {
 	content: "";
 	height: 44px;
@@ -508,7 +537,8 @@ label.pan
 .panning #channels
 {
 	background: linear-gradient(90deg, rgba(80,80,80) 2px, transparent 2px);
-	background-position: 50% 0;
+	/* centre of the fader, which ends before the 56px readout and 10px gap */
+	background-position: calc(50% - 33px) 0;
 	background-repeat: repeat-y;
 	background-size: 2px;
 }
@@ -607,6 +637,31 @@ label.pan
 }
 
 .locked .selectLabel:after
+{
+	display: none;
+}
+
+/*
+	Group trim faders, shown above the channels
+*/
+#channels > div.group label.volume
+{
+	margin-bottom: 14px;
+}
+
+#channels > div.group .name
+{
+	font-weight: bold;
+}
+
+#channels > div.group input[type='range']
+{
+	background: rgba(var(--tint, "6, 106, 166"), 0.75);
+}
+
+/* groups only trim levels, so hide them while panning */
+.panning #channels > div.group,
+.panning #channels h2.groupHeading
 {
 	display: none;
 }

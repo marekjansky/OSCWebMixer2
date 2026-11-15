@@ -26,6 +26,7 @@
 			<li><a href="#global" class="selected">Global Settings<div class="status"></div></a></li>
 			<li><a href="#aux">Auxiliaries</a></li>
 			<li><a href="#channels">Channels</a></li>
+			<li><a href="#groups">Groups</a></li>
 			<li><a href="#additional-devices">Additional Devices</a></li>
 			<li><a href="#devices">Locked Devices</a></li>
 			<li><a href="#presets">Presets</a></li>
@@ -74,6 +75,13 @@
 					<button type="button" class="invert-selection">Invert Selection</button>
 				</div>
 				<div id="channels" class="list"></div>
+			</section>
+
+			<section id="groups-content">
+				<div class="tips">Groups add a trim fader to every mix that moves all of the group's channels together, e.g. to turn the whole drum kit down. Assign channels to a group in the Channels tab. Each channel can be in one group.</div>
+				<input type="hidden" name="groupsSubmitted" value="1" />
+				<div id="groups" class="list"></div>
+				<button type="button" id="addGroup">+</button>
 			</section>
 
 			<section id="additional-devices-content">

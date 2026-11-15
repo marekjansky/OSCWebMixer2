@@ -14,6 +14,9 @@ A rewrite of [OSCWebMixer](https://github.com/castles/OSCWebMixer) - A server th
 * You can group your channels to make them easier to find
 * The current snapshot name is displayed in webmixer
 * Channel and auxiliary configuration can be saved as named presets and recalled later
+* Devices can be locked to a single mix so a player can't change anyone else's mix. Locks are managed in the admin area
+* Channels can be put into groups (e.g. Drums) that get a trim fader in every mix to turn the whole group up or down
+* Faders follow a console-style fader law and show their value in dB (or pan position) next to each fader
 
 ## Donate
 
@@ -49,6 +52,10 @@ Basic Auth on the admin area:
 * `ADMIN_PASSWORD` - if set, the admin area requires Basic Auth with this password. If unset (the
   default), the admin area remains unauthenticated.
 * `ADMIN_USER` - username to require alongside `ADMIN_PASSWORD`. Defaults to `admin`.
+
+`ADMIN_PASSWORD` is also what a player has to enter to unlock a device that has been locked to a
+mix with the padlock button. Without it anyone can unlock a device from the mixer. Locks are tied to
+the browser, so clearing the browser's site data also releases a device.
 
 ## Basic Setup Instructions
 

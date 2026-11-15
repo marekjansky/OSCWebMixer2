@@ -411,8 +411,9 @@ function movedown(e)
  * @param {integer} order - the position of the channel
  * @param {string} icon - the icon for the channel
  * @param {string} title - the section title
+ * @param {string} group - the id of the group the channel belongs to
  */
-function createChannel(number, enabled, name, order, icon="", title="")
+function createChannel(number, enabled, name, order, icon="", title="", group="")
 {
 	let channelWrap = document.createElement("div");
 	channelWrap.style.order = order;
@@ -444,6 +445,15 @@ function createChannel(number, enabled, name, order, icon="", title="")
 	channelWrap.appendChild(channelNameLabel);
 
 	addIconPicker(channelWrap, "channelIcon[]", icon);
+
+	let groupLabel = document.createElement("label");
+	let groupSelect = document.createElement("select");
+	groupSelect.name = "channelGroup[]";
+	groupSelect.className = "channel-group";
+	groupSelect.title = "Group";
+	groupSelect.dataset.value = group;
+	groupLabel.appendChild(groupSelect);
+	channelWrap.appendChild(groupLabel);
 
 	let moveUp = document.createElement("button");
 	moveUp.className = "up";
@@ -625,10 +635,11 @@ function fetchChannels()
 
 			for(let [index, channel] of json.entries())
 			{
-				createChannel(index + 1, channel.enabled, channel.name, channel.order, channel.icon, channel.title);
+				createChannel(index + 1, channel.enabled, channel.name, channel.order, channel.icon, channel.title, channel.group || "");
 			}
 
 			ensureValidOrder(channels.childNodes, "channelOrder[]");
+			refreshGroupSelects();
 		});
 }
 fetchChannels();
@@ -770,6 +781,7 @@ function onOpen()
 	*/
 	loadConfig();
 	fetchAux();
+	fetchGroups();
 	fetchChannels();
 	
 }
@@ -915,6 +927,7 @@ async function loadPreset(event) {
 		}
 
 		fetchAux();
+		fetchGroups();
 		fetchChannels();
 	}
 }
@@ -1092,3 +1105,123 @@ document.getElementById("refresh-devices").addEventListener("click", (e) => {
 });
 document.querySelector('nav a[href="#devices"]').addEventListener("click", refreshDeviceList);
 refreshDeviceList();
+
+
+/**
+ * Channel groups
+ */
+const groupsDiv = document.getElementById("groups");
+
+/**
+ * Create a random group id
+ * @returns {string}
+ */
+function newGroupId()
+{
+	return [...crypto.getRandomValues(new Uint8Array(6))].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Create a group row in the Groups tab
+ * @param {string} id
+ * @param {string} name
+ * @param {string} icon
+ */
+function createGroup(id = newGroupId(), name = "", icon = "")
+{
+	const groupWrap = document.createElement("div");
+	groupWrap.className = "group-row";
+
+	const idField = document.createElement("input");
+	idField.type = "hidden";
+	idField.name = "groupId[]";
+	idField.value = id;
+	groupWrap.appendChild(idField);
+
+	const nameLabel = document.createElement("label");
+	const nameField = document.createElement("input");
+	nameField.name = "groupName[]";
+	nameField.placeholder = "Group name, e.g. Drums";
+	nameField.required = true;
+	nameField.value = name;
+	nameField.addEventListener("input", refreshGroupSelects);
+	nameLabel.appendChild(nameField);
+	groupWrap.appendChild(nameLabel);
+
+	addIconPicker(groupWrap, "groupIcon[]", icon);
+
+	const deleteButton = document.createElement("button");
+	deleteButton.type = "button";
+	deleteButton.innerHTML = "&times;";
+	deleteButton.className = "delete";
+	deleteButton.addEventListener("click", (e) => {
+		e.preventDefault();
+		groupWrap.remove();
+		refreshGroupSelects();
+	});
+	groupWrap.appendChild(deleteButton);
+
+	groupsDiv.appendChild(groupWrap);
+	refreshGroupSelects();
+	return nameField;
+}
+
+/**
+ * The groups currently in the Groups tab (including unsaved edits)
+ * @returns {{id: string, name: string}[]}
+ */
+function currentGroups()
+{
+	return [...groupsDiv.querySelectorAll(".group-row")].map((row, index) => ({
+		id: row.querySelector('input[name="groupId[]"]').value,
+		name: row.querySelector('input[name="groupName[]"]').value || "Group " + (index + 1)
+	}));
+}
+
+/**
+ * Rebuild the options of every channel's group select, keeping the selected group
+ */
+function refreshGroupSelects()
+{
+	const groups = currentGroups();
+	for(const select of document.querySelectorAll('select[name="channelGroup[]"]'))
+	{
+		const selected = select.dataset.value ?? select.value;
+		delete select.dataset.value;
+		select.innerHTML = "";
+
+		const none = document.createElement("option");
+		none.value = "";
+		none.textContent = "No group";
+		select.appendChild(none);
+
+		for(const group of groups)
+		{
+			const option = document.createElement("option");
+			option.value = group.id;
+			option.textContent = group.name;
+			select.appendChild(option);
+		}
+		select.value = groups.some(group => group.id === selected) ? selected : "";
+	}
+}
+
+document.getElementById("addGroup").addEventListener("click", (e) => {
+	e.preventDefault();
+	createGroup().focus();
+});
+
+function fetchGroups()
+{
+	fetch("/groups", { cache: "no-store" })
+		.then((response) => response.json())
+		.then((json) => {
+			groupsDiv.innerHTML = "";
+			for(const group of json)
+			{
+				createGroup(group.id, group.name, group.icon || "");
+			}
+			refreshGroupSelects();
+		});
+}
+fetchGroups();
