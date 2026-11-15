@@ -19,7 +19,8 @@ unlockNeedsPassword = false,
 channelRows = new Map(), //channel number => {wrap, heading, arrangeName, visibility} for enabled channels
 adminOrder = [], //enabled channel numbers in the order set in the admin area
 channelOrder = [], //enabled channel numbers in this device's order for the selected aux
-hiddenChannels = new Set(); //channel numbers this device has hidden for the selected aux
+hiddenChannels = new Set(), //channel numbers hidden on the selected aux
+auxLayouts = {}; //aux number => {order, hidden}, stored on the server and shared by every device on that aux
 
 /**
  * Read a value from localStorage. Storage can be unavailable (private mode, blocked site data).
@@ -334,6 +335,7 @@ function onMessage(e)
 	{
 		lockedAux = json.config.lock ? json.config.lock.aux : null;
 		unlockNeedsPassword = json.config.unlockNeedsPassword === true;
+		auxLayouts = json.config.layouts || {};
 		updateLockUI();
 		snapshot.innerText = json.config.snapshot;
 		buildAux(json.config.aux);
@@ -380,6 +382,34 @@ function onMessage(e)
 			slider.value = json.args[0];
 			updateSlider(slider);
 		}
+	}
+
+	//another device changed the channel layout of an aux
+	let layoutMatch = json.address.match(/^\/Webmixer\/Aux\/([0-9]+)\/Layout$/);
+	if(layoutMatch !== null)
+	{
+		let layout = null;
+		try
+		{
+			layout = json.args && json.args.length ? JSON.parse(json.args[0]) : null;
+		}
+		catch(err)
+		{
+			layout = null;
+		}
+		if(layout)
+		{
+			auxLayouts[layoutMatch[1]] = layout;
+		}
+		else
+		{
+			delete auxLayouts[layoutMatch[1]];
+		}
+		if(layoutMatch[1] == selectedAux())
+		{
+			loadLayout();
+		}
+		return;
 	}
 
 	//update group trim
@@ -858,17 +888,7 @@ const layoutBar = (function()
 })();
 
 /**
- * localStorage key for this device's channel layout on an aux
- * @param {string} aux
- * @returns {string}
- */
-function layoutKey(aux)
-{
-	return "layout/" + aux;
-}
-
-/**
- * Load this device's channel order and hidden channels for the selected aux.
+ * Load the channel order and hidden channels for the selected aux.
  * Channels the admin has since disabled are dropped; newly enabled ones go at the end.
  */
 function loadLayout()
@@ -877,15 +897,7 @@ function loadLayout()
 	hiddenChannels = new Set();
 
 	const aux = selectedAux();
-	let saved = null;
-	try
-	{
-		saved = aux === undefined ? null : JSON.parse(storageGet(layoutKey(aux)));
-	}
-	catch(e)
-	{
-		saved = null;
-	}
+	const saved = aux === undefined ? null : auxLayouts[aux];
 
 	if(saved && Array.isArray(saved.order))
 	{
@@ -902,18 +914,25 @@ function loadLayout()
 }
 
 /**
- * Save the layout for the selected aux. The admin's layout isn't stored, so admin
- * changes still reach devices that never customised anything.
+ * Save the layout for the selected aux on the server, which passes it to every other device.
+ * The admin's layout isn't stored, so admin changes still reach auxes nobody customised.
  */
 function saveLayout()
 {
 	const aux = selectedAux();
-	if(aux === undefined)
+	if(aux === undefined || !ws)
 	{
 		return;
 	}
 	const isDefault = hiddenChannels.size == 0 && channelOrder.every((channel, i) => channel === adminOrder[i]);
-	storageSet(layoutKey(aux), isDefault ? null : JSON.stringify({ order: channelOrder, hidden: [...hiddenChannels] }));
+	if(isDefault)
+	{
+		delete auxLayouts[aux];
+		sendOSC("/Webmixer/Aux/" + aux + "/Layout");
+		return;
+	}
+	auxLayouts[aux] = { order: channelOrder.map(Number), hidden: [...hiddenChannels].map(Number) };
+	sendOSC("/Webmixer/Aux/" + aux + "/Layout", [JSON.stringify(auxLayouts[aux])]);
 }
 
 /**
@@ -963,7 +982,7 @@ function layoutClick(e)
 	}
 	if(action == "reset")
 	{
-		if(confirm("Reset the channel order and show all channels on this mix?"))
+		if(confirm("Reset the channel order and show all channels on this mix? This changes it for everyone on this mix."))
 		{
 			channelOrder = adminOrder.slice();
 			hiddenChannels = new Set();

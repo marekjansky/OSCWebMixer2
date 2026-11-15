@@ -12,6 +12,7 @@ const { getMainIPAddress, generateColour } = require('./lib/utils/utils.js');
 const { createAdminAuthMiddleware } = require('./lib/adminAuth.js');
 const deviceLock = require('./lib/deviceLocks.js');
 const groupTrim = require('./lib/groupTrim.js');
+const channelLayout = require('./lib/channelLayout.js');
 
 /**
  * Stores global configuration for webmixer
@@ -25,6 +26,13 @@ let currentState = configManager.getCurrentStateOrDefault();
  * @type {Object<string, {aux: number, ip: string, lockedAt: string}>}
  */
 let deviceLocks = configManager.getDeviceLocks();
+
+/**
+ * Channel order and hidden channels per aux, set from the mixer's "Arrange channels" mode.
+ * Persisted in config/layouts.json. An aux without an entry uses the admin layout.
+ * @type {Object<string, {order: number[], hidden: number[]}>}
+ */
+let channelLayouts = configManager.getChannelLayouts();
 
 // Configure logger to use settings from global config
 logger.configure(config.debug, false);
@@ -201,9 +209,47 @@ function buildConfig(deviceId = null)
 				.filter(group => channels.some(channel => channel.enabled && channel.group === group.id))
 				.map(group => ({ id: group.id, name: group.name, icon: group.icon || "" })),
 			lock: lock ? { aux: lock.aux } : null,
-			unlockNeedsPassword: Boolean(process.env.ADMIN_PASSWORD)
+			unlockNeedsPassword: Boolean(process.env.ADMIN_PASSWORD),
+			layouts: channelLayouts
 		}
 	});
+}
+
+/**
+ * Handle /Webmixer/Aux/{aux}/Layout [json]: save the channel layout for an aux and pass it
+ * to every other webmixer device, so everyone on that aux sees the same layout.
+ * @param {WebSocket} socket - the sending socket
+ * @param {{address: string, args: any[]}} oscMsg
+ * @returns {boolean} true if the message was a layout message and has been handled
+ */
+function handleLayoutMessage(socket, oscMsg)
+{
+	const aux = channelLayout.parseLayoutAddress(oscMsg.address);
+	if(aux === null)
+	{
+		return false;
+	}
+
+	const layout = channelLayout.sanitizeLayout(Array.isArray(oscMsg.args) ? oscMsg.args[0] : undefined);
+	if(layout)
+	{
+		channelLayouts[aux] = layout;
+	}
+	else
+	{
+		delete channelLayouts[aux];
+	}
+	try
+	{
+		configManager.saveChannelLayouts(channelLayouts);
+	}
+	catch(e)
+	{
+		logger.error("Failed to save channel layouts: " + e.message);
+	}
+
+	sendToSockets({address: channelLayout.layoutAddress(aux), args: layout ? [JSON.stringify(layout)] : []}, socket);
+	return true;
 }
 
 /**
@@ -987,7 +1033,7 @@ function startWebSocketServer() {
 				return;
 			}
 
-			if(handleGroupMessage(socket, oscMsg))
+			if(handleLayoutMessage(socket, oscMsg) || handleGroupMessage(socket, oscMsg))
 			{
 				return;
 			}
