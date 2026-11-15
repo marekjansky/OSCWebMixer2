@@ -813,22 +813,22 @@ label.pan
 	cursor: pointer;
 }
 
-#layoutBar button.done
+#layoutBar button.layout-done
 {
 	background: rgb(var(--tint, "6, 106, 166"));
 	border-color: transparent;
 	font-weight: bold;
 }
 
-#layoutBar button.reset,
-#layoutBar button.done,
-.arranging #layoutBar button.arrange
+#layoutBar button.layout-reset,
+#layoutBar button.layout-done,
+.arranging #layoutBar button.layout-arrange
 {
 	display: none;
 }
 
-.arranging #layoutBar button.reset,
-.arranging #layoutBar button.done
+.arranging #layoutBar button.layout-reset,
+.arranging #layoutBar button.layout-done
 {
 	display: block;
 }

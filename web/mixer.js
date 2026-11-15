@@ -879,7 +879,7 @@ const layoutBar = (function()
 	{
 		let button = document.createElement("button");
 		button.type = "button";
-		button.className = action;
+		button.className = "layout-" + action;
 		button.dataset.action = action;
 		button.textContent = text;
 		bar.appendChild(button);
