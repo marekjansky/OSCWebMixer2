@@ -699,3 +699,144 @@ label.pan
 {
 	display: none;
 }
+
+/*
+	Per-device channel layout: "Arrange channels" at the end of the list, and while
+	arranging each channel shows show/hide and move up/down controls instead of faders
+*/
+#channels > div.userHidden
+{
+	display: none;
+}
+
+#channels .arrange
+{
+	display: none;
+}
+
+.arranging #channels > div.userHidden
+{
+	display: grid;
+}
+
+.arranging #channels .arrange
+{
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 52px;
+	margin-top: 2px;
+	padding: 0 4px;
+	background: rgba(var(--tint, "6, 106, 166"), 0.4);
+}
+
+.arranging #channels > div.userHidden .arrange
+{
+	opacity: .45;
+}
+
+.arranging #channels label.volume,
+.arranging #channels label.pan,
+.arranging #channels > div.group,
+.arranging #channels h2.groupHeading
+{
+	display: none;
+}
+
+.arranging #channels
+{
+	background: none;
+}
+
+#channels .arrange .name
+{
+	flex: 1;
+	min-width: 0;
+	font-size: 18px;
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#channels .arrange button
+{
+	flex: none;
+	width: 44px;
+	height: 44px;
+	padding: 0;
+	border: 0;
+	cursor: pointer;
+	background: transparent center / 24px no-repeat;
+}
+
+#channels .arrange button.up
+{
+	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M6%2015l6-6%206%206'/%3E%3C/svg%3E");
+}
+
+#channels .arrange button.down
+{
+	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M6%209l6%206%206-6'/%3E%3C/svg%3E");
+}
+
+/* open eye: shown */
+#channels .arrange button.visibility
+{
+	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M2%2012s3.5-7%2010-7%2010%207%2010%207-3.5%207-10%207S2%2012%202%2012z'/%3E%3Ccircle%20cx='12'%20cy='12'%20r='3'/%3E%3C/svg%3E");
+}
+
+/* crossed-out eye: hidden */
+#channels .arrange button.visibility[aria-pressed="false"]
+{
+	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M2%2012s3.5-7%2010-7%2010%207%2010%207-3.5%207-10%207S2%2012%202%2012z'/%3E%3Cpath%20d='M4%204l16%2016'/%3E%3C/svg%3E");
+}
+
+#channels > #layoutBar
+{
+	order: 1000000;
+	display: flex;
+	justify-content: center;
+	gap: 10px;
+	padding: 30px 10px 20px;
+	background: #000;
+}
+
+#layoutBar button
+{
+	min-height: 44px;
+	padding: 0 20px;
+	border: 1px solid rgba(255,255,255,.5);
+	background: transparent;
+	color: #FFF;
+	font-size: 16px;
+	cursor: pointer;
+}
+
+#layoutBar button.done
+{
+	background: rgb(var(--tint, "6, 106, 166"));
+	border-color: transparent;
+	font-weight: bold;
+}
+
+#layoutBar button.reset,
+#layoutBar button.done,
+.arranging #layoutBar button.arrange
+{
+	display: none;
+}
+
+.arranging #layoutBar button.reset,
+.arranging #layoutBar button.done
+{
+	display: block;
+}
+
+/* keep Done in reach while scrolling a long list */
+.arranging #channels > #layoutBar
+{
+	position: sticky;
+	bottom: 0;
+	padding: 10px;
+}

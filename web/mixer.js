@@ -15,7 +15,11 @@ channelInputs = new Map(), //channel number => volume slider
 panInputs = new Map(), //channel number => pan slider
 groupInputs = new Map(), //group id => group trim slider
 lockedAux = null,
-unlockNeedsPassword = false;
+unlockNeedsPassword = false,
+channelRows = new Map(), //channel number => {wrap, heading, arrangeName, visibility} for enabled channels
+adminOrder = [], //enabled channel numbers in the order set in the admin area
+channelOrder = [], //enabled channel numbers in this device's order for the selected aux
+hiddenChannels = new Set(); //channel numbers this device has hidden for the selected aux
 
 /**
  * Read a value from localStorage. Storage can be unavailable (private mode, blocked site data).
@@ -397,6 +401,11 @@ function onMessage(e)
 		{
 			slider.closest("label").querySelector(".name").textContent = json.args[0];
 		}
+		const row = channelRows.get(channelNameMatch[1]);
+		if(row)
+		{
+			row.arrangeName.textContent = json.args[0];
+		}
 	}
 
 	//update Aux names
@@ -717,6 +726,11 @@ function buildChannels(channels, groups)
 	channelInputs = new Map();
 	panInputs = new Map();
 	groupInputs = new Map();
+	channelRows = new Map();
+	adminOrder = channels
+		.filter(channel => channel.enabled)
+		.sort((a, b) => a.order - b.order || a.channel - b.channel)
+		.map(channel => String(channel.channel));
 
 	if(groups.length > 0)
 	{
@@ -744,9 +758,10 @@ function buildChannels(channels, groups)
 
 	for(let channel of channels)
 	{
+		let heading = null;
 		if(channel.title != "")
 		{
-			let heading = document.createElement("h2");
+			heading = document.createElement("h2");
 			heading.style.order = channel.order;
 			heading.textContent = channel.title;
 			channelsDiv.appendChild(heading);
@@ -758,6 +773,12 @@ function buildChannels(channels, groups)
 			wrap.className = "disabled";
 		}
 		wrap.style.order = channel.order;
+
+		if(channel.enabled)
+		{
+			channelRows.set(String(channel.channel), Object.assign({ wrap, heading }, createArrangeControls(channel)));
+			wrap.appendChild(channelRows.get(String(channel.channel)).arrange);
+		}
 
 		for(let type of ["volume", "pan"])
 		{
@@ -771,12 +792,215 @@ function buildChannels(channels, groups)
 		channelsDiv.appendChild(wrap);
 	}
 
+	channelsDiv.appendChild(layoutBar);
+
 	for(let slider of document.querySelectorAll(".volumeInput, .panInput, .groupInput"))
 	{
 		slider.addEventListener('touchstart', tapSlider);
 		slider.addEventListener('dblclick', resetSlider);
 	}
 }
+
+/**
+ * Build the controls shown for a channel while arranging: show/hide, name, move up, move down
+ * @param {Object} channel
+ * @returns {{arrange: HTMLDivElement, arrangeName: HTMLSpanElement, visibility: HTMLButtonElement}}
+ */
+function createArrangeControls(channel)
+{
+	let arrange = document.createElement("div");
+	arrange.className = "arrange";
+
+	let visibility = document.createElement("button");
+	visibility.type = "button";
+	visibility.className = "visibility";
+	visibility.dataset.action = "toggle";
+	visibility.dataset.channel = channel.channel;
+	visibility.setAttribute("aria-label", "Show " + channel.label);
+	arrange.appendChild(visibility);
+
+	let arrangeName = document.createElement("span");
+	arrangeName.className = "name";
+	arrangeName.textContent = channel.label;
+	arrange.appendChild(arrangeName);
+
+	for(const [action, text] of [["up", "Move up"], ["down", "Move down"]])
+	{
+		let button = document.createElement("button");
+		button.type = "button";
+		button.className = action;
+		button.dataset.action = action;
+		button.dataset.channel = channel.channel;
+		button.setAttribute("aria-label", text);
+		arrange.appendChild(button);
+	}
+
+	return { arrange, arrangeName, visibility };
+}
+
+/**
+ * The bar at the end of the channel list: "Arrange channels", or "Reset" and "Done" while arranging
+ */
+const layoutBar = (function()
+{
+	let bar = document.createElement("div");
+	bar.id = "layoutBar";
+	for(const [action, text] of [["arrange", "Arrange channels"], ["reset", "Reset"], ["done", "Done"]])
+	{
+		let button = document.createElement("button");
+		button.type = "button";
+		button.className = action;
+		button.dataset.action = action;
+		button.textContent = text;
+		bar.appendChild(button);
+	}
+	return bar;
+})();
+
+/**
+ * localStorage key for this device's channel layout on an aux
+ * @param {string} aux
+ * @returns {string}
+ */
+function layoutKey(aux)
+{
+	return "layout/" + aux;
+}
+
+/**
+ * Load this device's channel order and hidden channels for the selected aux.
+ * Channels the admin has since disabled are dropped; newly enabled ones go at the end.
+ */
+function loadLayout()
+{
+	channelOrder = adminOrder.slice();
+	hiddenChannels = new Set();
+
+	const aux = selectedAux();
+	let saved = null;
+	try
+	{
+		saved = aux === undefined ? null : JSON.parse(storageGet(layoutKey(aux)));
+	}
+	catch(e)
+	{
+		saved = null;
+	}
+
+	if(saved && Array.isArray(saved.order))
+	{
+		const known = new Set(adminOrder);
+		const order = [...new Set(saved.order.map(String))].filter(channel => known.has(channel));
+		channelOrder = order.concat(adminOrder.filter(channel => !order.includes(channel)));
+	}
+	if(saved && Array.isArray(saved.hidden))
+	{
+		hiddenChannels = new Set(saved.hidden.map(String).filter(channel => channelRows.has(channel)));
+	}
+
+	applyLayout();
+}
+
+/**
+ * Save the layout for the selected aux. The admin's layout isn't stored, so admin
+ * changes still reach devices that never customised anything.
+ */
+function saveLayout()
+{
+	const aux = selectedAux();
+	if(aux === undefined)
+	{
+		return;
+	}
+	const isDefault = hiddenChannels.size == 0 && channelOrder.every((channel, i) => channel === adminOrder[i]);
+	storageSet(layoutKey(aux), isDefault ? null : JSON.stringify({ order: channelOrder, hidden: [...hiddenChannels] }));
+}
+
+/**
+ * Position and show/hide the channel rows to match channelOrder and hiddenChannels.
+ * A section heading moves with the channel it is attached to.
+ */
+function applyLayout()
+{
+	channelOrder.forEach((channel, i) =>
+	{
+		const row = channelRows.get(channel);
+		const hidden = hiddenChannels.has(channel);
+		row.wrap.style.order = i;
+		if(row.heading)
+		{
+			row.heading.style.order = i;
+		}
+		row.wrap.classList.toggle("userHidden", hidden);
+		row.visibility.setAttribute("aria-pressed", hidden ? "false" : "true");
+		row.visibility.setAttribute("aria-label", (hidden ? "Show " : "Hide ") + row.arrangeName.textContent);
+	});
+}
+
+/**
+ * Handle the arrange controls and the layout bar
+ * @param {!Event} e - the click event
+ */
+function layoutClick(e)
+{
+	const button = e.target.closest("button[data-action]");
+	if(!button || !channelsDiv.contains(button))
+	{
+		return;
+	}
+	const action = button.dataset.action;
+	const channel = button.dataset.channel;
+
+	if(action == "arrange")
+	{
+		document.body.classList.add("arranging");
+		return;
+	}
+	if(action == "done")
+	{
+		document.body.classList.remove("arranging");
+		return;
+	}
+	if(action == "reset")
+	{
+		if(confirm("Reset the channel order and show all channels on this mix?"))
+		{
+			channelOrder = adminOrder.slice();
+			hiddenChannels = new Set();
+			applyLayout();
+			saveLayout();
+		}
+		return;
+	}
+	if(action == "toggle")
+	{
+		if(hiddenChannels.has(channel))
+		{
+			hiddenChannels.delete(channel);
+		}
+		else
+		{
+			hiddenChannels.add(channel);
+		}
+	}
+	if(action == "up" || action == "down")
+	{
+		const i = channelOrder.indexOf(channel);
+		const j = action == "up" ? i - 1 : i + 1;
+		if(i < 0 || j < 0 || j >= channelOrder.length)
+		{
+			return;
+		}
+		[channelOrder[i], channelOrder[j]] = [channelOrder[j], channelOrder[i]];
+	}
+	applyLayout();
+	saveLayout();
+	if(action != "toggle")
+	{
+		channelRows.get(channel).wrap.scrollIntoView({ block: "nearest" });
+	}
+}
+channelsDiv.addEventListener("click", layoutClick);
 
 /**
  * When socket is connected
@@ -886,6 +1110,9 @@ document.addEventListener("DOMContentLoaded", function()
 		{
 			setSliderDb(slider, 0);
 		}
+
+		//each aux has its own channel layout on this device
+		loadLayout();
 
 		//request all the channel values for the selected aux
 		requestValues();

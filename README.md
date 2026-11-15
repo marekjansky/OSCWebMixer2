@@ -16,6 +16,7 @@ A rewrite of [OSCWebMixer](https://github.com/castles/OSCWebMixer) - A server th
 * Channel and auxiliary configuration can be saved as named presets and recalled later
 * Devices can be locked to a single mix so a player can't change anyone else's mix. Locks are managed in the admin area
 * Channels can be put into groups (e.g. Drums) that get a trim fader in every mix to turn the whole group up or down
+* Each player can reorder and hide channels for their own mix with "Arrange channels" at the bottom of the mixer. The layout is saved in that browser, per mix
 * Faders follow a console-style fader law and show their value in dB (or pan position) next to each fader
 
 ## Donate
