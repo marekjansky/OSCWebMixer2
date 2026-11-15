@@ -792,13 +792,13 @@ label.pan
 	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M2%2012s3.5-7%2010-7%2010%207%2010%207-3.5%207-10%207S2%2012%202%2012z'/%3E%3Cpath%20d='M4%204l16%2016'/%3E%3C/svg%3E");
 }
 
+/* Reset and Done, shown at the end of the list while arranging */
 #channels > #layoutBar
 {
 	order: 1000000;
-	display: flex;
+	display: none;
 	justify-content: center;
 	gap: 10px;
-	padding: 30px 10px 20px;
 	background: #000;
 }
 
@@ -820,23 +820,46 @@ label.pan
 	font-weight: bold;
 }
 
-#layoutBar button.layout-reset,
-#layoutBar button.layout-done,
-.arranging #layoutBar button.layout-arrange
-{
-	display: none;
-}
-
-.arranging #layoutBar button.layout-reset,
-.arranging #layoutBar button.layout-done
-{
-	display: block;
-}
-
 /* keep Done in reach while scrolling a long list */
 .arranging #channels > #layoutBar
 {
+	display: flex;
 	position: sticky;
 	bottom: 0;
 	padding: 10px;
+}
+
+/*
+	Arrange button in the header, next to the lock. The header's side columns are
+	88px so the mix name stays centred.
+*/
+#mix
+{
+	grid-template-columns: 88px 1fr 88px;
+}
+
+#mix > div:last-child
+{
+	width: 88px;
+	justify-content: flex-end;
+}
+
+#arrange
+{
+	width: 44px;
+	height: 44px;
+	padding: 0;
+	border: 0;
+	cursor: pointer;
+	opacity: .8;
+	/* list with up/down arrows */
+	background: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M3%206h11M3%2012h11M3%2018h11M19%204v16M16.5%206.5L19%204l2.5%202.5M16.5%2017.5L19%2020l2.5-2.5'/%3E%3C/svg%3E") center / 22px no-repeat;
+}
+
+/* while arranging it becomes a "done" check mark */
+#arrange[aria-pressed="true"]
+{
+	opacity: 1;
+	background-color: rgba(255,255,255,.2);
+	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M5%2012.5l4.5%204.5L19%207'/%3E%3C/svg%3E");
 }

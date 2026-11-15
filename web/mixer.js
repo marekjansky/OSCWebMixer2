@@ -7,7 +7,8 @@ auxSelect = document.getElementById('aux'),
 panCheckbox = document.getElementById("panning"),
 auxiliaries = document.getElementById("auxiliaries"),
 snapshot = document.getElementById("snapshot"),
-lockButton = document.getElementById("lock");
+lockButton = document.getElementById("lock"),
+arrangeButton = document.getElementById("arrange");
 
 let ws = null,
 timeout = null,
@@ -869,13 +870,13 @@ function createArrangeControls(channel)
 }
 
 /**
- * The bar at the end of the channel list: "Arrange channels", or "Reset" and "Done" while arranging
+ * The bar at the end of the channel list while arranging: "Reset" and "Done"
  */
 const layoutBar = (function()
 {
 	let bar = document.createElement("div");
 	bar.id = "layoutBar";
-	for(const [action, text] of [["arrange", "Arrange channels"], ["reset", "Reset"], ["done", "Done"]])
+	for(const [action, text] of [["reset", "Reset"], ["done", "Done"]])
 	{
 		let button = document.createElement("button");
 		button.type = "button";
@@ -970,14 +971,9 @@ function layoutClick(e)
 	const action = button.dataset.action;
 	const channel = button.dataset.channel;
 
-	if(action == "arrange")
-	{
-		document.body.classList.add("arranging");
-		return;
-	}
 	if(action == "done")
 	{
-		document.body.classList.remove("arranging");
+		setArranging(false);
 		return;
 	}
 	if(action == "reset")
@@ -1020,6 +1016,22 @@ function layoutClick(e)
 	}
 }
 channelsDiv.addEventListener("click", layoutClick);
+
+/**
+ * Switch arrange mode on or off
+ * @param {boolean} on
+ */
+function setArranging(on)
+{
+	document.body.classList.toggle("arranging", on);
+	arrangeButton.setAttribute("aria-pressed", on ? "true" : "false");
+	arrangeButton.title = on ? "Done arranging" : "Arrange channels";
+	if(on)
+	{
+		document.getElementById("channelsWrap").scrollTop = 0;
+	}
+}
+arrangeButton.addEventListener("click", () => setArranging(!document.body.classList.contains("arranging")));
 
 /**
  * When socket is connected
