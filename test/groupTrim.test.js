@@ -11,7 +11,11 @@ const {
 	isValidGroupId,
 	parseGroupAddress,
 	groupAddress,
-	groupMembers
+	groupMembers,
+	limitGroupMove,
+	planGroupMove,
+	MAX_STEP_UP_DB,
+	STEP_FLOOR_DB
 } = require("../lib/groupTrim.js");
 
 /**
@@ -107,4 +111,73 @@ test("group members are the channels assigned to the group", () =>
 	assert.deepEqual(groupMembers(channels, "vox"), [5]);
 	assert.deepEqual(groupMembers(channels, "none"), []);
 	assert.deepEqual(groupMembers(undefined, "drums"), []);
+});
+
+test("group members can be filtered (disabled channels are not trimmed)", () =>
+{
+	const channels = [{ group: "drums" }, { group: "drums" }, { group: "drums" }];
+	assert.deepEqual(groupMembers(channels, "drums", channel => channel !== 2), [1, 3]);
+});
+
+test("limitGroupMove never limits a move down", () =>
+{
+	assert.equal(limitGroupMove(0, -150), -150);
+	assert.equal(limitGroupMove(10, -40), -40);
+});
+
+test("limitGroupMove limits a single big jump up", () =>
+{
+	assert.equal(limitGroupMove(-30, 10), -30 + MAX_STEP_UP_DB);
+	assert.equal(limitGroupMove(-10, 0), 0, "small moves pass");
+	//from off, the inaudible bottom of the fader may be crossed in one go
+	assert.equal(limitGroupMove(-150, -70), -70);
+	assert.equal(limitGroupMove(-150, 10), STEP_FLOOR_DB + MAX_STEP_UP_DB);
+});
+
+test("planGroupMove rejects a move while any member level is unknown", () =>
+{
+	const levels = new Map([[1, -10], [2, undefined], [3, -5]]);
+	assert.deepEqual(planGroupMove(0, -3, levels), {action: "reject", missing: [2]});
+});
+
+test("planGroupMove ignores non-numbers instead of treating them as off", () =>
+{
+	assert.deepEqual(planGroupMove(0, "loud", new Map()), {action: "ignore"});
+	assert.deepEqual(planGroupMove(0, NaN, new Map()), {action: "ignore"});
+	assert.deepEqual(planGroupMove(0, undefined, new Map()), {action: "ignore"});
+});
+
+test("planGroupMove applies clamped and limited moves", () =>
+{
+	const levels = new Map([[1, -10]]);
+	assert.deepEqual(planGroupMove(0, -6, levels), {action: "apply", levelDb: -6, deltaDb: -6, limited: false});
+	assert.deepEqual(planGroupMove(-40, 50, levels), {action: "apply", levelDb: -20, deltaDb: 20, limited: true});
+	assert.deepEqual(planGroupMove(0, 50, levels), {action: "apply", levelDb: MAX_DB, deltaDb: 10, limited: false});
+	assert.deepEqual(planGroupMove(0, 0, new Map()), {action: "apply", levelDb: 0, deltaDb: 0, limited: false});
+});
+
+test("a group pulled to off and back up step by step restores the balance and never exceeds the start", () =>
+{
+	//the server sends the limited level back; a client dragging up gets there in steps
+	const start = [-10, -3];
+	let group = 0;
+	let sends = start.slice();
+	let virtual = [null, null];
+	const move = requested => {
+		const plan = planGroupMove(group, requested, new Map(sends.map((level, i) => [i, level])));
+		group = plan.levelDb;
+		sends = sends.map((level, i) => {
+			const result = applyTrim(level, virtual[i], plan.deltaDb);
+			virtual[i] = result.virtualDb;
+			return result.sendDb;
+		});
+	};
+	move(-150);
+	assert.deepEqual(sends, [MIN_DB, MIN_DB]);
+	while(group < 0)
+	{
+		move(0);
+		assert.ok(sends.every((level, i) => level <= start[i]));
+	}
+	assert.deepEqual(sends, start);
 });
