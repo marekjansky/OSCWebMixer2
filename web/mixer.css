@@ -55,7 +55,7 @@ select
 	-webkit-backdrop-filter: blur(10px);
 	backdrop-filter: blur(10px);
 	z-index: 10;
-	grid-row: 1 / 4;
+	grid-row: 1 / 5;
 	grid-column: 1;
 }
 
@@ -80,7 +80,7 @@ body
 	right: 0;
 	bottom: 0;
 
-	grid-template-rows: calc(env(safe-area-inset-top) + 44px) min-content 1fr;
+	grid-template-rows: calc(env(safe-area-inset-top) + 44px) min-content min-content 1fr;
 	grid-template-columns: 100%;
 }
 
@@ -117,7 +117,7 @@ body
 	text-align: center;
 	background: #333;
 	padding: 5px;
-	grid-row: 2;
+	grid-row: 3;
 	grid-column: 1;
 }
 
@@ -180,7 +180,7 @@ body
 #channelsWrap
 {
 	padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-	grid-row: 3;
+	grid-row: 4;
 	grid-column: 1;
 	overflow: auto;
 	-webkit-overflow-scrolling: touch;
@@ -453,17 +453,37 @@ body.disconnected
 	overflow: hidden;
 }
 
-body.disconnected #loader
+body.disconnected #loader,
+body.waiting #loader
 {
 	display: block;
 }
 
-body.disconnected #overlay
+/* covers the header and the aux picker too */
+#overlay
 {
-	display: block;
+	z-index: 20;
 }
 
-body.disconnected #channelsWrap
+body.disconnected #overlay,
+body.waiting #overlay
+{
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+#overlayMessage
+{
+	margin-top: 170px;
+	padding: 0 20px;
+	font-size: 20px;
+	font-weight: bold;
+	text-align: center;
+}
+
+body.disconnected #channelsWrap,
+body.waiting #channelsWrap
 {
 	pointer-events: none;
 	overflow: hidden;
@@ -862,4 +882,122 @@ label.pan
 	opacity: 1;
 	background-color: rgba(255,255,255,.2);
 	background-image: url("data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23FFF'%20stroke-width='2.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M5%2012.5l4.5%204.5L19%207'/%3E%3C/svg%3E");
+}
+
+/*
+	Banner under the header: desk not responding, or this device's mix changed on the desk
+*/
+#banner
+{
+	grid-row: 2;
+	grid-column: 1;
+	text-align: center;
+	font-weight: bold;
+	line-height: 1.3;
+}
+
+#banner:empty
+{
+	display: none;
+}
+
+#banner > div
+{
+	padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
+}
+
+#banner .offline
+{
+	background: #B3261E;
+}
+
+#banner .suspended
+{
+	background: #B35C00;
+}
+
+/*
+	Faders can't be moved while nothing may be sent (connecting, desk loading or not
+	responding, mix changed on the desk)
+*/
+body.readonly #channels input[type='range']::-webkit-slider-thumb
+{
+	pointer-events: none;
+}
+
+body.readonly #channels input[type=range]::-moz-range-thumb
+{
+	pointer-events: none;
+}
+
+body.readonly #channels .fader
+{
+	opacity: .45;
+}
+
+#arrange:disabled
+{
+	opacity: .3;
+	cursor: default;
+}
+
+/*
+	A send whose value hasn't been received: no fill, a dimmed thumb and "unknown"
+	instead of a value, so it isn't mistaken for off
+*/
+label.unknown .fader:after,
+label.unknown .fader:before
+{
+	display: none;
+}
+
+label.unknown input[type='range']::-webkit-slider-thumb
+{
+	background-color: rgba(255,255,255,.4);
+}
+
+label.unknown input[type=range]::-moz-range-thumb
+{
+	background-color: rgba(255,255,255,.4);
+}
+
+label.unknown .fader output span
+{
+	font-size: 15px;
+	font-weight: 600;
+	font-style: italic;
+	color: rgba(255,255,255,.75);
+}
+
+label.volume.unknown .fader output span::after
+{
+	content: none;
+}
+
+/* a group trim can only be moved once its level is known */
+#channels > div.group label.unknown input[type='range']::-webkit-slider-thumb
+{
+	pointer-events: none;
+}
+
+#channels > div.group label.unknown input[type=range]::-moz-range-thumb
+{
+	pointer-events: none;
+}
+
+/*
+	Small marker on names that changed on the desk and haven't been confirmed by the engineer
+*/
+.changedMarker,
+.selectLabel span.changed::after,
+#auxiliaries button.changed .label::after
+{
+	content: "";
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #FFB020;
+	margin-left: 6px;
+	vertical-align: middle;
 }

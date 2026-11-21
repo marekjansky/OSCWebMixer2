@@ -27,9 +27,10 @@
 			<label class="selectLabel"><img src="" width="22" height="22" class="icon" /><span></span><select id="aux"></select></label>
 			<div><button id="arrange" type="button" aria-label="Arrange channels" aria-pressed="false" title="Arrange channels"></button><button id="lock" type="button" aria-label="Lock this device to the current mix" aria-pressed="false"></button></div>
 		</div>
+		<div id="banner" role="alert"></div>
 		<div id="snapshot"></div>
 		<div id="channelsWrap"><div id="channels"></div></div>
-		<div id="overlay" class="fullscreen"></div>
+		<div id="overlay" class="fullscreen"><p id="overlayMessage" role="status">Connecting to the mixer…</p></div>
 		<div id="loader"></div>
 		<div id="auxiliaries" class="fullscreen"></div>
 		<script src="mixer.min.js"></script>

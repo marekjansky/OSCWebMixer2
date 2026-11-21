@@ -3,18 +3,56 @@
 (() => {
 
 const channelsDiv = document.getElementById('channels'),
+channelsWrap = document.getElementById('channelsWrap'),
 auxSelect = document.getElementById('aux'),
 panCheckbox = document.getElementById("panning"),
 auxiliaries = document.getElementById("auxiliaries"),
 snapshot = document.getElementById("snapshot"),
+banner = document.getElementById("banner"),
+overlayMessage = document.getElementById("overlayMessage"),
 lockButton = document.getElementById("lock"),
 arrangeButton = document.getElementById("arrange");
 
+/** No message at all from the server for this long (it sends a status every 5 s) => the connection is dead */
+const KEEPALIVE_TIMEOUT = 12000;
+/** Give up on a socket that is still connecting after this long and start a new one */
+const CONNECT_TIMEOUT = 2500;
+/** Wait this long after a connection is lost before trying again */
+const RECONNECT_DELAY = 2000;
+/** Page hidden for longer than this => assume the connection died while asleep and reconnect on wake */
+const HIDDEN_RECONNECT = 3000;
+/** A finger has to move this far (px) before a fader sends anything */
+const MOVE_PX = 6;
+/** ...or the fader value has to change by this much (fallback if touchmove isn't delivered) */
+const MOVE_VALUE = 0.06;
+/** A tap is a touch shorter than this that didn't move */
+const TAP_MAX_MS = 300;
+/** Two taps on the same fader within this time reset it */
+const DOUBLE_TAP_MS = 350;
+/** A config held back because a fader is being touched is applied anyway after this long */
+const CONFIG_HOLD_MAX = 10000;
+
 let ws = null,
-timeout = null,
+connectTimer = null,
+reconnectTimer = null,
+lastRx = 0, //time anything was last received on the current socket
+anyMessage = false, //anything received on the current socket yet
+statusSeen = false, //a /Webmixer/Status was received on the current socket (the server sends keep-alives)
+deskState = null, //"loading" | "online" | "offline" from /Webmixer/Status, null = not told yet
+hasConfig = false, //a config has been applied on the current socket
+pendingConfig = null, //config waiting for the user to let go of the faders
+pendingConfigSince = 0,
+hiddenAt = 0,
 channelInputs = new Map(), //channel number => volume slider
 panInputs = new Map(), //channel number => pan slider
 groupInputs = new Map(), //group id => group trim slider
+known = new Map(), //OSC address => {value, db} last known send level/pan/group level, any aux
+activeSliders = new Set(), //sliders being touched or dragged with the mouse
+touches = new Map(), //touch identifier => {slider, x, y}
+mouseGesture = null, //{slider, x, y}
+lastTouchTime = 0,
+currentAux = undefined, //aux whose values the faders currently show
+lockInfo = null, //{aux, suspended, auxName} when this device is locked to an aux
 lockedAux = null,
 unlockNeedsPassword = false,
 channelRows = new Map(), //channel number => {wrap, heading, arrangeName, visibility} for enabled channels
@@ -193,13 +231,21 @@ function updateSlider(slider, db)
 	slider.parentNode.style.setProperty('--value', (slider.value * 100) + "%");
 	slider.parentNode.style.setProperty('--v', slider.value);
 
-	const readout = slider.closest("label").querySelector("output");
+	const label = slider.closest("label");
+	const unknown = Boolean(slider.fs && !slider.fs.known);
+	label.classList.toggle("unknown", unknown);
+
+	const readout = label.querySelector("output");
 	if(!readout)
 	{
 		return;
 	}
 	let text;
-	if(slider.classList.contains("panInput"))
+	if(unknown)
+	{
+		text = "unknown";
+	}
+	else if(slider.classList.contains("panInput"))
 	{
 		text = formatPan(slider.value);
 	}
@@ -214,14 +260,27 @@ function updateSlider(slider, db)
 }
 
 /**
- * Set a slider from a dB value
+ * Show a known value on a slider
  * @param {HTMLInputElement} slider
- * @param {number} db
+ * @param {{value: number, db?: number}} v - slider position and, for levels, the exact dB
  */
-function setSliderDb(slider, db)
+function showValue(slider, v)
 {
-	slider.value = dbToSlider(db);
-	updateSlider(slider, db);
+	slider.fs.known = true;
+	slider.value = v.value;
+	updateSlider(slider, v.db);
+}
+
+/**
+ * Show a slider whose value hasn't been received from the server. The thumb sits at the
+ * bottom (centre for pan) and the readout says "unknown" rather than pretending it is off.
+ * @param {HTMLInputElement} slider
+ */
+function showUnknown(slider)
+{
+	slider.fs.known = false;
+	slider.value = slider.classList.contains("panInput") ? 0.5 : 0;
+	updateSlider(slider);
 }
 
 /**
@@ -235,54 +294,106 @@ function selectedAux()
 }
 
 /**
- * callback for when a channel volume or pan changes
- * @param {!Event} e - the channel volume/pan change event
+ * The OSC address a slider controls on an aux
+ * @param {HTMLInputElement} slider
+ * @param {string} aux
+ * @returns {string}
  */
-function sliderChange(e)
+function sliderAddress(slider, aux)
 {
-	let sliderValue = parseFloat(this.value);
-
-	updateSlider(this);
-
-	if(!ws || selectedAux() === undefined)
+	if(slider.classList.contains("groupInput"))
 	{
-		return;
+		return "/Webmixer/Aux/" + aux + "/Group/" + slider.dataset.group + "/level";
 	}
-
-	let parameter = "level";
-
-	if(this.classList.contains("volumeInput"))
-	{
-		sliderValue = sliderToDb(sliderValue);
-	}
-
-	if(this.classList.contains("panInput"))
-	{
-		parameter = "pan";
-	}
-
-	sendOSC("/Input_Channels/" + this.dataset.channel + "/Aux_Send/" + selectedAux() + "/send_" + parameter, [sliderValue]);
+	return "/Input_Channels/" + slider.dataset.channel + "/Aux_Send/" + aux + "/send_" + (slider.classList.contains("panInput") ? "pan" : "level");
 }
 
 /**
- * callback for when a group trim fader moves
- * @param {!Event} e - the input event
+ * Show the last known value for a slider on the selected aux, or "unknown"
+ * @param {HTMLInputElement} slider
  */
-function groupSliderChange(e)
+function refreshSlider(slider)
 {
-	updateSlider(this);
-
-	if(!ws || selectedAux() === undefined)
+	const aux = selectedAux();
+	const v = aux === undefined ? undefined : known.get(sliderAddress(slider, aux));
+	if(v)
 	{
-		return;
+		showValue(slider, v);
 	}
-
-	sendOSC("/Webmixer/Aux/" + selectedAux() + "/Group/" + this.dataset.group + "/level", [sliderToDb(this.value)]);
+	else
+	{
+		showUnknown(slider);
+	}
 }
 
+/**
+ * Refresh every slider that isn't being touched
+ */
+function refreshAllSliders()
+{
+	for(const map of [channelInputs, panInputs, groupInputs])
+	{
+		for(const slider of map.values())
+		{
+			if(!slider.fs.gesture)
+			{
+				refreshSlider(slider);
+			}
+		}
+	}
+}
+
+/**
+ * Is the socket open and has the server said something on it?
+ * @returns {boolean}
+ */
+function isConnected()
+{
+	return Boolean(ws && ws.readyState === WebSocket.OPEN && anyMessage);
+}
+
+/**
+ * The desk state to act on. A server that never sends a status (older version) is treated
+ * as online once it has sent a config.
+ * @returns {"loading"|"online"|"offline"}
+ */
+function effectiveDeskState()
+{
+	if(deskState)
+	{
+		return deskState;
+	}
+	return hasConfig ? "online" : "loading";
+}
+
+/**
+ * May this device read values and send non-level messages (queries, layouts) for its aux?
+ * @returns {boolean}
+ */
+function canQuery()
+{
+	return isConnected() && hasConfig && effectiveDeskState() !== "loading" && !(lockInfo && lockInfo.suspended);
+}
+
+/**
+ * May this device change levels right now? Never while connecting, while the server is
+ * loading desk data, while the desk isn't answering, or while this device's locked mix
+ * changed on the desk and hasn't been confirmed.
+ * @returns {boolean}
+ */
+function canSend()
+{
+	return canQuery() && effectiveDeskState() === "online" && selectedAux() !== undefined;
+}
+
+/**
+ * Send a message over the socket if it is open. Callers decide whether the message is allowed.
+ * @param {string} address
+ * @param {Array} [args]
+ */
 function sendOSC(address, args = [])
 {
-	if(ws.readyState != WebSocket.OPEN)
+	if(!ws || ws.readyState != WebSocket.OPEN)
 	{
 		return;
 	}
@@ -293,12 +404,86 @@ function sendOSC(address, args = [])
 }
 
 /**
+ * callback for when a channel volume/pan or group trim fader moves
+ */
+function faderInput()
+{
+	const slider = this, gesture = slider.fs.gesture;
+	const value = parseFloat(slider.value);
+
+	if(gesture && !gesture.moved && Math.abs(value - gesture.startValue) >= MOVE_VALUE)
+	{
+		gesture.moved = true;
+	}
+
+	//a touch that hasn't really moved yet (a tap, or the slider snapping to the finger)
+	//never sends anything. Neither does a gesture that was blocked once: if sending was
+	//stopped mid-move it stays stopped until the finger is lifted, so the level can't jump
+	//to wherever the finger has got to in the meantime.
+	if(gesture && (gesture.blocked || !gesture.moved))
+	{
+		refreshSlider(slider);
+		return;
+	}
+
+	//without a touch or mouse gesture, only keyboard changes to the focused slider count
+	//(and not a late event straight after a finger was lifted)
+	if(!gesture && (document.activeElement !== slider || Date.now() - slider.fs.gestureEnd < 500))
+	{
+		refreshSlider(slider);
+		return;
+	}
+
+	if(!commitSlider(slider) && gesture)
+	{
+		gesture.blocked = true;
+	}
+}
+
+/**
+ * Send a slider's current position, if sending is allowed. Otherwise the slider goes back to
+ * the last known value.
+ * @param {HTMLInputElement} slider
+ * @returns {boolean} true if it was sent
+ */
+function commitSlider(slider)
+{
+	const fs = slider.fs;
+	const value = parseFloat(slider.value);
+
+	//a group trim moves every member by the difference to its current level, so it can only be
+	//moved once its current level is known
+	if(!canSend() || (slider.classList.contains("groupInput") && !fs.known))
+	{
+		refreshSlider(slider);
+		return false;
+	}
+
+	const address = sliderAddress(slider, selectedAux());
+	let arg, db;
+	if(slider.classList.contains("panInput"))
+	{
+		arg = value;
+	}
+	else
+	{
+		db = sliderToDb(value);
+		arg = db;
+	}
+	known.set(address, { value, db });
+	fs.known = true;
+	updateSlider(slider, db);
+	sendOSC(address, [arg]);
+	return true;
+}
+
+/**
  * Request current AUX values from server
  */
 function requestValues()
 {
 	const aux = selectedAux();
-	if(aux === undefined)
+	if(aux === undefined || !canQuery())
 	{
 		return;
 	}
@@ -314,11 +499,92 @@ function requestValues()
 }
 
 /**
+ * A level, pan or group trim value arrived from the server. Remember it and show it, unless
+ * the fader is under a finger: then it is shown when the finger lets go.
+ * @param {string} address
+ * @param {string} aux
+ * @param {HTMLInputElement|undefined} slider - the slider for that address on the selected aux
+ * @param {{value: number, db?: number}} v
+ */
+function remoteValue(address, aux, slider, v)
+{
+	known.set(address, v);
+	if(slider && aux == selectedAux() && !slider.fs.gesture)
+	{
+		showValue(slider, v);
+	}
+}
+
+/**
+ * Parse a dB argument
+ * @param {*} arg
+ * @returns {{value: number, db: number}|null}
+ */
+function levelValue(arg)
+{
+	const db = Number(arg);
+	if(!Number.isFinite(db))
+	{
+		return null;
+	}
+	const clamped = Math.min(MAX_DB, Math.max(MIN_DB, db));
+	return { value: dbToSlider(clamped), db: clamped };
+}
+
+/**
+ * Handle /Webmixer/Status
+ * @param {*} arg - JSON string {desk: "loading"|"online"|"offline"}
+ */
+function handleStatus(arg)
+{
+	let status = arg;
+	if(typeof arg === "string")
+	{
+		try
+		{
+			status = JSON.parse(arg);
+		}
+		catch(e)
+		{
+			return;
+		}
+	}
+	if(!status || !["loading", "online", "offline"].includes(status.desk))
+	{
+		return;
+	}
+	statusSeen = true;
+
+	const previous = effectiveDeskState();
+	deskState = status.desk;
+
+	if(deskState === "loading" && previous !== "loading")
+	{
+		//the server is (re)loading the desk, maybe a different session: forget every value
+		known.clear();
+		refreshAllSliders();
+	}
+	if(deskState === "online" && previous !== "online")
+	{
+		//values may have changed while the desk wasn't answering
+		requestValues();
+	}
+	updateStatusUI();
+}
+
+/**
  * Callback for when socket receives a message
  * @param {MessageEvent} e - the message socket event
  */
 function onMessage(e)
 {
+	lastRx = Date.now();
+	if(!anyMessage)
+	{
+		anyMessage = true;
+		updateStatusUI();
+	}
+
 	let json;
 	try
 	{
@@ -328,20 +594,15 @@ function onMessage(e)
 	{
 		return;
 	}
+	if(!json || typeof json !== "object")
+	{
+		return;
+	}
 
-	//console.log(json);
-
-	//Setup AUX and channels
+	//Setup AUX and channels. This can arrive at any time: renames, admin changes, presets...
 	if(json.config)
 	{
-		lockedAux = json.config.lock ? json.config.lock.aux : null;
-		unlockNeedsPassword = json.config.unlockNeedsPassword === true;
-		auxLayouts = json.config.layouts || {};
-		updateLockUI();
-		snapshot.innerText = json.config.snapshot;
-		buildAux(json.config.aux);
-		buildChannels(json.config.channels, json.config.groups || []);
-		auxSelect.dispatchEvent(new Event("change"));
+		receiveConfig(json.config);
 		return;
 	}
 
@@ -349,40 +610,45 @@ function onMessage(e)
 	{
 		return;
 	}
+	const args = Array.isArray(json.args) ? json.args : [];
+
+	if(json.address == "/Webmixer/Status")
+	{
+		handleStatus(args[0]);
+		return;
+	}
 
 	if(json.address == "/Webmixer/Error")
 	{
-		alert(json.args[0]);
+		alert(args[0]);
 		return;
 	}
 
 	if(json.address == "/SnapshotName")
 	{
-		snapshot.innerText = json.args[0];
+		snapshot.textContent = args[0] === undefined ? "" : args[0];
+		return;
 	}
 
-	//update level
-	let sendLevel = json.address.match(/^\/Input_Channels\/([0-9]+)\/Aux_Send\/([0-9]+)\/send_level$/);
-	if(sendLevel !== null)
+	//update level or pan
+	const send = json.address.match(/^\/Input_Channels\/([0-9]+)\/Aux_Send\/([0-9]+)\/send_(level|pan)$/);
+	if(send !== null)
 	{
-		const slider = channelInputs.get(sendLevel[1]);
-		if(sendLevel[2] == selectedAux() && slider)
+		let v;
+		if(send[3] == "level")
 		{
-			setSliderDb(slider, parseFloat(json.args[0]));
+			v = levelValue(args[0]);
 		}
-	}
-
-	//update pan
-	let sendPan = json.address.match(/^\/Input_Channels\/([0-9]+)\/Aux_Send\/([0-9]+)\/send_pan$/);
-	if(sendPan !== null)
-	{
-		//0 to +1
-		const slider = panInputs.get(sendPan[1]);
-		if(sendPan[2] == selectedAux() && slider)
+		else
 		{
-			slider.value = json.args[0];
-			updateSlider(slider);
+			const pan = Number(args[0]);
+			v = Number.isFinite(pan) ? { value: Math.min(1, Math.max(0, pan)) } : null;
 		}
+		if(v)
+		{
+			remoteValue(json.address, send[2], (send[3] == "level" ? channelInputs : panInputs).get(send[1]), v);
+		}
+		return;
 	}
 
 	//another device changed the channel layout of an aux
@@ -392,7 +658,7 @@ function onMessage(e)
 		let layout = null;
 		try
 		{
-			layout = json.args && json.args.length ? JSON.parse(json.args[0]) : null;
+			layout = args.length ? JSON.parse(args[0]) : null;
 		}
 		catch(err)
 		{
@@ -417,55 +683,109 @@ function onMessage(e)
 	let groupLevel = json.address.match(/^\/Webmixer\/Aux\/([0-9]+)\/Group\/([A-Za-z0-9_-]+)\/level$/);
 	if(groupLevel !== null)
 	{
-		const slider = groupInputs.get(groupLevel[2]);
-		if(groupLevel[1] == selectedAux() && slider)
+		const v = levelValue(args[0]);
+		if(v)
 		{
-			setSliderDb(slider, parseFloat(json.args[0]));
+			remoteValue(json.address, groupLevel[1], groupInputs.get(groupLevel[2]), v);
 		}
+		return;
 	}
 
 	//update channel names
 	let channelNameMatch = json.address.match(/^\/Input_Channels\/([0-9]+)\/Channel_Input\/name$/);
-	if(channelNameMatch !== null)
+	if(channelNameMatch !== null && typeof args[0] === "string")
 	{
 		for(let slider of document.querySelectorAll('input[data-channel="' + channelNameMatch[1] + '"]'))
 		{
-			slider.closest("label").querySelector(".name").textContent = json.args[0];
+			slider.closest("label").querySelector(".name").textContent = args[0];
 		}
 		const row = channelRows.get(channelNameMatch[1]);
 		if(row)
 		{
-			row.arrangeName.textContent = json.args[0];
+			row.arrangeName.textContent = args[0];
 		}
+		return;
 	}
 
 	//update Aux names
 	let auxNameMatch = json.address.match(/^\/Aux_Outputs\/([0-9]+)\/Buss_Trim\/name$/);
-	if(auxNameMatch !== null)
+	if(auxNameMatch !== null && typeof args[0] === "string")
 	{
-		//update the select
 		for(let option of auxSelect.options)
 		{
 			if(option.value == auxNameMatch[1])
 			{
-				option.textContent = json.args[0];
-
-				//make sure the aux span is correct
-				auxSelect.previousElementSibling.textContent = auxSelect.getElementsByTagName("option")[auxSelect.selectedIndex].text;
+				option.textContent = args[0];
 			}
 		}
-
-		//update the buttons
+		if(selectedAux() == auxNameMatch[1])
+		{
+			auxSelect.previousElementSibling.textContent = args[0];
+		}
 		for(let button of auxiliaries.getElementsByTagName("button"))
 		{
 			if(button.value == auxNameMatch[1])
 			{
-				button.lastChild.nodeValue = json.args[0];
-				return; //no need to update sliders if a button was changed
+				button.querySelector(".label").textContent = args[0];
 			}
 		}
 	}
+}
 
+/**
+ * A config arrived. The lock state is applied straight away (it decides whether this device
+ * may send). The page itself is rebuilt once no fader is being touched, so a finger on a
+ * fader isn't yanked off it.
+ * @param {Object} config
+ */
+function receiveConfig(config)
+{
+	const lock = config.lock;
+	lockInfo = lock && lock.aux !== undefined && lock.aux !== null ? {
+		aux: Number(lock.aux),
+		suspended: lock.suspended === true,
+		auxName: typeof lock.auxName === "string" ? lock.auxName : ""
+	} : null;
+	lockedAux = lockInfo ? lockInfo.aux : null;
+	unlockNeedsPassword = config.unlockNeedsPassword === true;
+	updateLockUI();
+
+	if(activeSliders.size > 0)
+	{
+		if(!pendingConfig)
+		{
+			pendingConfigSince = Date.now();
+		}
+		pendingConfig = config;
+		updateStatusUI();
+		return;
+	}
+	applyConfig(config);
+}
+
+/**
+ * Rebuild the page from a config, keeping the selected aux, panning view, scroll position
+ * and every value already known.
+ * @param {Object} config
+ */
+function applyConfig(config)
+{
+	pendingConfig = null;
+	hasConfig = true;
+
+	const previousAux = currentAux;
+	const wasPanning = panCheckbox.checked;
+	const scroll = channelsWrap.scrollTop;
+
+	auxLayouts = config.layouts || {};
+	snapshot.textContent = config.snapshot || "";
+	buildAux(Array.isArray(config.aux) ? config.aux : []);
+	buildChannels(Array.isArray(config.channels) ? config.channels : [], Array.isArray(config.groups) ? config.groups : []);
+	selectAux(previousAux !== undefined && previousAux === selectedAux() && wasPanning);
+
+	channelsWrap.scrollTop = scroll;
+	updateLockUI();
+	updateStatusUI();
 }
 
 /**
@@ -485,11 +805,6 @@ function formatColour(hex)
  */
 function buildAux(options)
 {
-	if(!options)
-	{
-    	return;
-	}
-
 	auxiliaries.innerHTML = "";
 	auxSelect.innerHTML = "";
 
@@ -515,6 +830,7 @@ function buildAux(options)
 		opt.dataset.colour = colour;
 		opt.dataset.stereo = option.stereo;
 		opt.dataset.icon = iconsrc;
+		opt.dataset.changed = option.changed === true;
 		opt.textContent = option.label;
 		auxSelect.appendChild(opt);
 
@@ -528,10 +844,16 @@ function buildAux(options)
 		icon.height = 30;
 		button.appendChild(icon);
 
-		let buttonText = document.createTextNode(option.label);
-		button.appendChild(buttonText);
+		let text = document.createElement("span");
+		text.className = "label";
+		text.textContent = option.label;
+		button.appendChild(text);
 
-
+		if(option.changed === true)
+		{
+			button.classList.add("changed");
+			button.title = "Renamed on the desk, not yet confirmed by the engineer";
+		}
 
 		auxiliaries.appendChild(button);
 	}
@@ -552,15 +874,141 @@ function buildAux(options)
 }
 
 /**
+ * Show the selected aux: header, tint, panning, layout and values.
+ * @param {boolean} keepPanning - stay in the panning view (if the aux is stereo)
+ */
+function selectAux(keepPanning)
+{
+	const option = auxSelect.options[auxSelect.selectedIndex];
+	const aux = selectedAux();
+
+	if(aux !== currentAux)
+	{
+		//a finger still on a fader is now on a different mix's fader: it mustn't send anything
+		for(const slider of activeSliders)
+		{
+			slider.fs.gesture.blocked = true;
+		}
+	}
+	currentAux = aux;
+
+	const headerText = auxSelect.previousElementSibling;
+	const headerIcon = headerText.previousElementSibling;
+
+	if(!option)
+	{
+		headerText.textContent = "";
+		headerText.classList.remove("changed");
+		headerIcon.src = "";
+		panCheckbox.parentNode.style.display = "none";
+		panCheckbox.checked = false;
+		document.body.classList.remove("panning");
+		loadLayout();
+		refreshAllSliders();
+		return;
+	}
+
+	//save aux value so it can be restored
+	storageSet("aux", option.value);
+
+	//set the current page tint
+	document.body.style.setProperty('--tint', option.dataset.colour);
+
+	//set the current aux text
+	headerText.textContent = option.text;
+	headerText.classList.toggle("changed", option.dataset.changed == "true");
+	headerText.title = option.dataset.changed == "true" ? "Renamed on the desk, not yet confirmed by the engineer" : "";
+	headerIcon.src = option.dataset.icon;
+
+	//toggle visibility of the pan checkbox
+	const stereo = option.dataset.stereo == "true";
+	panCheckbox.parentNode.style.display = stereo ? "flex" : "none";
+	panCheckbox.checked = keepPanning && stereo;
+	document.body.classList.toggle("panning", panCheckbox.checked);
+
+	//each aux has its own channel layout
+	loadLayout();
+
+	//show what is already known about this aux, then ask the server for everything
+	refreshAllSliders();
+	requestValues();
+}
+
+/**
  * Reflect the lock state in the page
  */
 function updateLockUI()
 {
 	const locked = lockedAux !== null;
+	const suspended = Boolean(lockInfo && lockInfo.suspended);
 	document.body.classList.toggle("locked", locked);
+	document.body.classList.toggle("suspended", suspended);
 	auxSelect.disabled = locked;
 	lockButton.setAttribute("aria-pressed", locked ? "true" : "false");
 	lockButton.title = locked ? "Locked to this mix. Tap to unlock." : "Lock this device to the current mix";
+	arrangeButton.disabled = suspended;
+	if(suspended)
+	{
+		setArranging(false);
+	}
+	updateStatusUI();
+}
+
+/**
+ * Show the connection / desk state: overlay while connecting or waiting for the desk,
+ * banner when the desk stops answering or this device's mix changed on the desk, and
+ * disable the faders whenever nothing may be sent.
+ */
+function updateStatusUI()
+{
+	const connected = isConnected();
+	const desk = effectiveDeskState();
+	const waiting = connected && (!hasConfig || desk === "loading");
+	const offline = connected && hasConfig && desk === "offline";
+	const suspended = Boolean(lockInfo && lockInfo.suspended);
+
+	document.body.classList.toggle("disconnected", !connected);
+	document.body.classList.toggle("waiting", waiting);
+	document.body.classList.toggle("deskOffline", offline);
+
+	let message = "";
+	if(!connected)
+	{
+		message = "Connecting to the mixer…";
+	}
+	else if(waiting)
+	{
+		message = desk === "offline" ? "Waiting for mixing desk… (not responding)" : "Waiting for mixing desk…";
+	}
+	if(overlayMessage.textContent !== message)
+	{
+		overlayMessage.textContent = message;
+	}
+
+	const lines = [];
+	if(offline)
+	{
+		lines.push(["offline", "Mixing desk not responding. Faders are disabled until it answers again."]);
+	}
+	if(suspended && connected && !waiting)
+	{
+		lines.push(["suspended", "Your mix changed on the desk (aux " + lockInfo.aux + " is now '" + lockInfo.auxName + "'). Ask the engineer to confirm."]);
+	}
+	const bannerKey = JSON.stringify(lines);
+	if(banner.dataset.key !== bannerKey)
+	{
+		banner.dataset.key = bannerKey;
+		banner.innerHTML = "";
+		for(const [type, text] of lines)
+		{
+			const line = document.createElement("div");
+			line.className = type;
+			line.textContent = text;
+			banner.appendChild(line);
+		}
+	}
+
+	document.body.classList.toggle("readonly", !canSend());
 }
 
 /**
@@ -570,7 +1018,7 @@ function lockClick(e)
 {
 	e.preventDefault();
 
-	if(!ws || ws.readyState != WebSocket.OPEN)
+	if(!isConnected())
 	{
 		return;
 	}
@@ -629,9 +1077,10 @@ auxSelect.addEventListener("mousedown", auxMouseDown);
  */
 function auxPickerClick(e)
 {
-	if(e.target.nodeName == "BUTTON" && lockedAux === null)
+	const button = e.target.closest("button");
+	if(button && lockedAux === null)
 	{
-		auxSelect.value = e.target.value;
+		auxSelect.value = button.value;
 		auxSelect.dispatchEvent(new Event("change"));
 
 		document.body.classList.remove("auxPicker");
@@ -639,44 +1088,204 @@ function auxPickerClick(e)
 }
 auxiliaries.addEventListener("click", auxPickerClick);
 
-//Detect double tap events for touch devices
-let tapedTwice = false;
-function tapSlider(e)
+/*
+	Touch handling. Each fader tracks its own touches:
+	- nothing is sent until the finger has really moved (so a tap or a resting finger never
+	  changes a level, and an "unknown" fader stays unknown until it is moved)
+	- values arriving from the desk or other devices aren't applied under the finger; the
+	  latest is shown when the finger lets go
+	- a double tap on the same volume or pan fader without moving resets it (off / centre).
+	  Group trims have no double-tap reset.
+*/
+
+/**
+ * A finger or the mouse went down on a slider
+ * @param {HTMLInputElement} slider
+ */
+function startGesture(slider)
 {
-	if(!tapedTwice)
+	if(slider.fs.gesture)
 	{
-		tapedTwice = true;
-		setTimeout( function() { tapedTwice = false; }, 300 );
-		return false;
+		slider.fs.gesture.count++;
+		return;
 	}
-	resetSlider(e);
+	slider.fs.gesture = {
+		count: 1,
+		startValue: parseFloat(slider.value),
+		startTime: Date.now(),
+		moved: false,
+		blocked: !canSend()
+	};
+	activeSliders.add(slider);
 }
 
 /**
- * Reset a fader to its default value.
- - Pan sliders will be set to centre
- - Volume sliders will be set to off
- - Group trims will be set to 0 dB (no trim)
- * @param {Event} e - The Tap or Click Event
+ * A finger or the mouse was lifted from a slider
+ * @param {HTMLInputElement} slider
+ * @param {boolean} tapped - it was a short touch that didn't move
  */
-function resetSlider(e)
+function endGesture(slider, tapped)
 {
-	if(e.target.classList.contains("volumeInput"))
+	const gesture = slider.fs.gesture;
+	if(!gesture)
 	{
-		e.target.value = 0;
+		return;
+	}
+	if(--gesture.count > 0)
+	{
+		return;
+	}
+	slider.fs.gesture = null;
+	slider.fs.gestureEnd = Date.now();
+	activeSliders.delete(slider);
+
+	//show the latest value, including anything that arrived while it was touched
+	refreshSlider(slider);
+
+	if(tapped && Date.now() - gesture.startTime < TAP_MAX_MS && !gesture.moved && !slider.classList.contains("groupInput"))
+	{
+		if(Date.now() - slider.fs.lastTap < DOUBLE_TAP_MS)
+		{
+			slider.fs.lastTap = 0;
+			resetSlider(slider);
+		}
+		else
+		{
+			slider.fs.lastTap = Date.now();
+		}
+	}
+	else
+	{
+		slider.fs.lastTap = 0;
 	}
 
-	if(e.target.classList.contains("panInput"))
+	if(activeSliders.size == 0 && pendingConfig)
 	{
-		e.target.value = 0.5;
+		applyConfig(pendingConfig);
 	}
+}
 
-	if(e.target.classList.contains("groupInput"))
+/**
+ * Forget every touch, e.g. when the page is hidden and touchend may never arrive
+ */
+function endAllGestures()
+{
+	touches.clear();
+	mouseGesture = null;
+	for(const slider of [...activeSliders])
 	{
-		e.target.value = dbToSlider(0);
+		slider.fs.gesture.count = 1;
+		endGesture(slider, false);
 	}
+}
 
-	e.target.dispatchEvent(new Event("input"));
+function sliderTouchStart(e)
+{
+	lastTouchTime = Date.now();
+	for(const touch of e.changedTouches)
+	{
+		touches.set(touch.identifier, { slider: this, x: touch.clientX, y: touch.clientY });
+		startGesture(this);
+	}
+}
+
+function documentTouchMove(e)
+{
+	lastTouchTime = Date.now();
+	for(const touch of e.changedTouches)
+	{
+		const t = touches.get(touch.identifier);
+		if(t && t.slider.fs.gesture && Math.hypot(touch.clientX - t.x, touch.clientY - t.y) >= MOVE_PX)
+		{
+			t.slider.fs.gesture.moved = true;
+		}
+	}
+}
+
+function documentTouchEnd(e)
+{
+	lastTouchTime = Date.now();
+	for(const touch of e.changedTouches)
+	{
+		const t = touches.get(touch.identifier);
+		if(t)
+		{
+			touches.delete(touch.identifier);
+			endGesture(t.slider, e.type == "touchend");
+		}
+	}
+	//touches whose end we missed (element rebuilt, events lost)
+	if(e.touches.length == 0 && activeSliders.size > 0 && !mouseGesture)
+	{
+		endAllGestures();
+	}
+}
+
+document.addEventListener("touchmove", documentTouchMove, { passive: true, capture: true });
+document.addEventListener("touchend", documentTouchEnd, { passive: true, capture: true });
+document.addEventListener("touchcancel", documentTouchEnd, { passive: true, capture: true });
+
+function sliderMouseDown(e)
+{
+	//touch devices also send mouse events after a tap
+	if(Date.now() - lastTouchTime < 1000 || e.button !== 0 || mouseGesture)
+	{
+		return;
+	}
+	mouseGesture = { slider: this, x: e.clientX, y: e.clientY };
+	startGesture(this);
+}
+
+document.addEventListener("mousemove", function(e)
+{
+	if(mouseGesture && mouseGesture.slider.fs.gesture && Math.hypot(e.clientX - mouseGesture.x, e.clientY - mouseGesture.y) >= MOVE_PX)
+	{
+		mouseGesture.slider.fs.gesture.moved = true;
+	}
+}, true);
+
+document.addEventListener("mouseup", function()
+{
+	if(mouseGesture)
+	{
+		const slider = mouseGesture.slider;
+		mouseGesture = null;
+		endGesture(slider, false);
+	}
+}, true);
+
+/**
+ * Double click (mouse) resets a volume or pan fader
+ */
+function sliderDoubleClick()
+{
+	if(Date.now() - lastTouchTime < 1000)
+	{
+		return; //touch double taps are handled in endGesture
+	}
+	resetSlider(this);
+}
+
+/**
+ * Reset a fader to its default value: volume to off, pan to centre. This is an explicit
+ * user action, so it is sent like any other move (if sending is allowed).
+ * @param {HTMLInputElement} slider
+ */
+function resetSlider(slider)
+{
+	if(slider.classList.contains("volumeInput"))
+	{
+		slider.value = 0;
+	}
+	else if(slider.classList.contains("panInput"))
+	{
+		slider.value = 0.5;
+	}
+	else
+	{
+		return;
+	}
+	commitSlider(slider);
 }
 
 /**
@@ -685,10 +1294,10 @@ function resetSlider(e)
  * @param {string} labelText
  * @param {string} iconSrc
  * @param {string} inputClass
- * @param {number} value - initial slider value
+ * @param {boolean} changed - the name changed on the desk and hasn't been confirmed
  * @returns {{label: HTMLLabelElement, input: HTMLInputElement}}
  */
-function createFader(type, labelText, iconSrc, inputClass, value)
+function createFader(type, labelText, iconSrc, inputClass, changed)
 {
 	let label = document.createElement("label");
 	label.className = type;
@@ -708,6 +1317,14 @@ function createFader(type, labelText, iconSrc, inputClass, value)
 	name.textContent = labelText;
 	label.appendChild(name);
 
+	if(changed)
+	{
+		let marker = document.createElement("span");
+		marker.className = "changedMarker";
+		marker.title = "Renamed on the desk, not yet confirmed by the engineer";
+		label.appendChild(marker);
+	}
+
 	let row = document.createElement("div");
 	row.className = "faderRow";
 
@@ -720,7 +1337,7 @@ function createFader(type, labelText, iconSrc, inputClass, value)
 	input.step = "0.001";
 	input.min = "0";
 	input.max = "1";
-	input.value = value;
+	input.fs = { known: false, gesture: null, gestureEnd: 0, lastTap: 0 };
 	fader.appendChild(input);
 
 	//the value readout sits inside the fader track, on the right. It has a white layer and a
@@ -741,7 +1358,15 @@ function createFader(type, labelText, iconSrc, inputClass, value)
 
 	label.appendChild(row);
 
-	updateSlider(input);
+	input.addEventListener("input", faderInput);
+	input.addEventListener("touchstart", sliderTouchStart, { passive: true });
+	input.addEventListener("mousedown", sliderMouseDown);
+	if(inputClass != "groupInput")
+	{
+		input.addEventListener("dblclick", sliderDoubleClick);
+	}
+
+	showUnknown(input);
 
 	return { label, input };
 }
@@ -778,10 +1403,9 @@ function buildChannels(channels, groups)
 		wrap.className = "group";
 		wrap.style.order = -1;
 
-		const { label, input } = createFader("volume", group.name, group.icon, "groupInput", dbToSlider(0));
+		const { label, input } = createFader("volume", group.name, group.icon, "groupInput", false);
 		input.dataset.group = group.id;
-		input.addEventListener("input", groupSliderChange);
-		groupInputs.set(group.id, input);
+		groupInputs.set(String(group.id), input);
 
 		wrap.appendChild(label);
 		channelsDiv.appendChild(wrap);
@@ -790,7 +1414,7 @@ function buildChannels(channels, groups)
 	for(let channel of channels)
 	{
 		let heading = null;
-		if(channel.title != "")
+		if(channel.title)
 		{
 			heading = document.createElement("h2");
 			heading.style.order = channel.order;
@@ -813,9 +1437,8 @@ function buildChannels(channels, groups)
 
 		for(let type of ["volume", "pan"])
 		{
-			const { label, input } = createFader(type, channel.label, channel.icon, type == "volume" ? "volumeInput" : "panInput", type == "volume" ? 0 : 0.5);
+			const { label, input } = createFader(type, channel.label, channel.icon, type == "volume" ? "volumeInput" : "panInput", channel.changed === true);
 			input.dataset.channel = channel.channel;
-			input.addEventListener("input", sliderChange);
 			(type == "volume" ? channelInputs : panInputs).set(String(channel.channel), input);
 			wrap.appendChild(label);
 		}
@@ -824,12 +1447,6 @@ function buildChannels(channels, groups)
 	}
 
 	channelsDiv.appendChild(layoutBar);
-
-	for(let slider of document.querySelectorAll(".volumeInput, .panInput, .groupInput"))
-	{
-		slider.addEventListener('touchstart', tapSlider);
-		slider.addEventListener('dblclick', resetSlider);
-	}
 }
 
 /**
@@ -917,23 +1534,25 @@ function loadLayout()
 /**
  * Save the layout for the selected aux on the server, which passes it to every other device.
  * The admin's layout isn't stored, so admin changes still reach auxes nobody customised.
+ * @returns {boolean} false if it can't be saved right now
  */
 function saveLayout()
 {
 	const aux = selectedAux();
-	if(aux === undefined || !ws)
+	if(aux === undefined || !canQuery())
 	{
-		return;
+		return false;
 	}
 	const isDefault = hiddenChannels.size == 0 && channelOrder.every((channel, i) => channel === adminOrder[i]);
 	if(isDefault)
 	{
 		delete auxLayouts[aux];
 		sendOSC("/Webmixer/Aux/" + aux + "/Layout");
-		return;
+		return true;
 	}
 	auxLayouts[aux] = { order: channelOrder.map(Number), hidden: [...hiddenChannels].map(Number) };
 	sendOSC("/Webmixer/Aux/" + aux + "/Layout", [JSON.stringify(auxLayouts[aux])]);
+	return true;
 }
 
 /**
@@ -975,6 +1594,10 @@ function layoutClick(e)
 	{
 		setArranging(false);
 		return;
+	}
+	if(!canQuery())
+	{
+		return; //the layout can't be saved right now
 	}
 	if(action == "reset")
 	{
@@ -1028,59 +1651,168 @@ function setArranging(on)
 	arrangeButton.title = on ? "Done arranging" : "Arrange channels";
 	if(on)
 	{
-		document.getElementById("channelsWrap").scrollTop = 0;
+		channelsWrap.scrollTop = 0;
 	}
 }
 arrangeButton.addEventListener("click", () => setArranging(!document.body.classList.contains("arranging")));
 
-/**
- * When socket is connected
- */
-function onOpen()
-{
-	document.body.classList.remove("disconnected");
-}
+/*
+	Connection handling. There is only ever one live socket: an old one has its handlers
+	removed and is closed before a new one starts, and events from any socket other than
+	the current one are ignored.
+*/
 
 /**
- * When a socket connection fails
+ * Close the current socket without letting its events affect anything
  */
-function noConnection()
+function dropSocket()
 {
-	// connection closed, discard old websocket and create a new one in 2s
-	if(ws)
+	if(!ws)
 	{
-		ws.close();
+		return;
 	}
-	clearTimeout(timeout);
-	timeout = setTimeout(startWebsocket, 2000);
-	document.body.classList.add("disconnected");
+	const old = ws;
+	ws = null;
+	old.onopen = old.onmessage = old.onclose = old.onerror = null;
+	try
+	{
+		old.close();
+	}
+	catch(e)
+	{
+		//ignore
+	}
 }
 
 /**
- * Start the connection to the server
+ * Start a fresh connection to the server, dropping any existing one
  */
-function startWebsocket()
+function connect()
 {
-	ws = new WebSocket("ws://" + document.location.host + "/?device=" + encodeURIComponent(deviceId));
-	ws.onopen = onOpen;
-	ws.onmessage = onMessage;
-	ws.onclose = noConnection;
-	ws.onerror = noConnection;
+	clearTimeout(connectTimer);
+	clearTimeout(reconnectTimer);
+	dropSocket();
+
+	//values are only trusted while connected: a fresh connection asks for everything again
+	known.clear();
+	anyMessage = false;
+	statusSeen = false;
+	deskState = null;
+	hasConfig = false;
+	lastRx = Date.now();
+	refreshAllSliders();
+
+	const socket = new WebSocket((location.protocol == "https:" ? "wss://" : "ws://") + location.host + "/?device=" + encodeURIComponent(deviceId));
+	ws = socket;
+	socket.onopen = function()
+	{
+		if(this !== ws)
+		{
+			return;
+		}
+		clearTimeout(connectTimer);
+		lastRx = Date.now();
+		updateStatusUI();
+	};
+	socket.onmessage = function(e)
+	{
+		if(this !== ws)
+		{
+			return;
+		}
+		onMessage(e);
+	};
+	socket.onclose = socket.onerror = function()
+	{
+		if(this !== ws)
+		{
+			return;
+		}
+		connectionLost();
+	};
 
 	/**
-	 * Safari on iOS 26.1 only connects to web socket every second page load. Calling startWebsocket
-	 * again seems to fix this. I don't know why and I can't find any other solutions.
+	 * Safari on iOS 26.1 only connects to web socket every second page load. Starting a new
+	 * socket when the first is still connecting after a moment fixes this.
 	 */
-	clearTimeout(timeout);
-	timeout = setTimeout(() => {
-		if(ws.readyState === WebSocket.CONNECTING)
+	connectTimer = setTimeout(() => {
+		if(ws === socket && socket.readyState === WebSocket.CONNECTING)
 		{
-			startWebsocket();
+			connect();
 		}
-	}, 2000);
+	}, CONNECT_TIMEOUT);
+
+	updateStatusUI();
 }
 
+/**
+ * The connection closed or failed: show it and try again shortly
+ */
+function connectionLost()
+{
+	dropSocket();
+	updateStatusUI();
+	clearTimeout(connectTimer);
+	clearTimeout(reconnectTimer);
+	reconnectTimer = setTimeout(connect, RECONNECT_DELAY);
+}
 
+/**
+ * Watchdog: the server sends a status at least every 5 s, so a long silence means the
+ * connection is half-open (Wi-Fi dropped, tablet slept) even if the socket looks open.
+ */
+setInterval(function()
+{
+	const now = Date.now();
+	if(ws && ws.readyState === WebSocket.OPEN)
+	{
+		//an older server without keep-alives can be quiet for a long time: only time out
+		//once it has shown it sends them, or if it never said anything at all
+		if((statusSeen || !anyMessage) && now - lastRx > KEEPALIVE_TIMEOUT)
+		{
+			connectionLost();
+			return;
+		}
+	}
+	if(pendingConfig && now - pendingConfigSince > CONFIG_HOLD_MAX)
+	{
+		endAllGestures(); //applies the pending config
+	}
+}, 1000);
+
+document.addEventListener("visibilitychange", function()
+{
+	if(document.hidden)
+	{
+		hiddenAt = Date.now();
+		endAllGestures();
+		return;
+	}
+	//after a sleep the socket is often dead without knowing it: start again rather than
+	//show values that may be stale
+	if(!ws || ws.readyState !== WebSocket.OPEN || Date.now() - hiddenAt > HIDDEN_RECONNECT || Date.now() - lastRx > KEEPALIVE_TIMEOUT / 2)
+	{
+		connect();
+	}
+});
+
+window.addEventListener("pageshow", function(e)
+{
+	//restored from the back/forward cache: the old socket is gone
+	if(e.persisted)
+	{
+		endAllGestures();
+		connect();
+	}
+});
+
+window.addEventListener("online", function()
+{
+	if(!ws || ws.readyState !== WebSocket.OPEN)
+	{
+		connect();
+	}
+});
 
 /**
  * When page has loaded
@@ -1090,63 +1822,15 @@ document.addEventListener("DOMContentLoaded", function()
 	//ensure the browser doesn't remember checked status
 	panCheckbox.checked = false;
 
-	startWebsocket();
+	connect();
 
 	/**
 	 * Handle Aux Select Changes
 	 */
-	auxSelect.addEventListener("change", function(e)
+	auxSelect.addEventListener("change", function()
 	{
-		//save aux value so it can be restored
-		storageSet("aux", this.value);
-
-		let option = this.getElementsByTagName("option")[this.selectedIndex];
-
-		//set the current page tint
-		let colour = option.dataset.colour;
-		document.body.style.setProperty('--tint', colour);
-
-		//set the current aux text
-		this.previousElementSibling.textContent = option.text;
-
-		this.previousElementSibling.previousElementSibling.src = option.dataset.icon;
-
-		//toggle visibility of the pan checkbox
-		if(option.dataset.stereo == "true")
-		{
-			panCheckbox.parentNode.style.display = "flex";
-		}
-		else
-		{
-			panCheckbox.parentNode.style.display = "none";
-		}
-
-		//disable panning if it was previously selected
-		panCheckbox.checked = false;
-		panCheckbox.dispatchEvent(new Event("change"));
-
-
-		//clear all current values
-		for(let slider of channelInputs.values())
-		{
-			slider.value = 0;
-			updateSlider(slider);
-		}
-		for(let slider of panInputs.values())
-		{
-			slider.value = 0.5;
-			updateSlider(slider);
-		}
-		for(let slider of groupInputs.values())
-		{
-			setSliderDb(slider, 0);
-		}
-
-		//each aux has its own channel layout on this device
-		loadLayout();
-
-		//request all the channel values for the selected aux
-		requestValues();
+		selectAux(false);
+		updateStatusUI();
 	});
 
 	/**
@@ -1154,14 +1838,7 @@ document.addEventListener("DOMContentLoaded", function()
 	 */
 	panCheckbox.addEventListener("change", function(e)
 	{
-		if(this.checked)
-		{
-			document.body.classList.add("panning");
-		}
-		else
-		{
-			document.body.classList.remove("panning");
-		}
+		document.body.classList.toggle("panning", this.checked);
 	});
 });
 
