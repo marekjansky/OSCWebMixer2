@@ -1066,7 +1066,7 @@ button.sendOn.holding::before
 	inset: 0;
 	background: rgba(46, 158, 68, .75);
 	transform-origin: left;
-	animation: sendOnHold 600ms linear forwards;
+	animation: sendOnHold 350ms linear forwards;
 }
 
 @keyframes sendOnHold

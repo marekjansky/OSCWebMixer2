@@ -32,7 +32,7 @@ const DOUBLE_TAP_MS = 350;
 /** A config held back because a fader is being touched is applied anyway after this long */
 const CONFIG_HOLD_MAX = 10000;
 //how long a send's ON button must be held to switch the send on (off is a single tap)
-const HOLD_TO_TURN_ON_MS = 600;
+const HOLD_TO_TURN_ON_MS = 350;
 
 let ws = null,
 connectTimer = null,

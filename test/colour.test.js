@@ -3,8 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { colourForName, hslToHex, normaliseName, sameColour } = require("../lib/colour.js");
-const { generateColour } = require("../lib/utils/utils.js");
+const { colourForName, assignColours, PALETTE, hslToHex, normaliseName, sameColour } = require("../lib/colour.js");
 
 /** WCAG relative luminance of a #rrggbb colour */
 function luminance(hex)
@@ -39,44 +38,47 @@ test("different names usually give different colours", () =>
 	assert.notEqual(colourForName("Vox 1"), colourForName("Vox 2"));
 });
 
-test("hues are well spread over many names", () =>
+test("every palette colour keeps white text readable and stands out from a black background", () =>
 {
-	const buckets = new Array(6).fill(0);
-	for(let i = 0; i < 600; i++)
+	for(const colour of PALETTE)
 	{
-		const hex = colourForName(`Musician ${i}`);
-		const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
-		const max = Math.max(r, g, b), min = Math.min(r, g, b);
-		let hue;
-		if(max === r) hue = ((g - b) / (max - min) + 6) % 6;
-		else if(max === g) hue = (b - r) / (max - min) + 2;
-		else hue = (r - g) / (max - min) + 4;
-		buckets[Math.floor(hue)]++;
-	}
-	for(const count of buckets)
-	{
-		assert.ok(count > 50 && count < 150, `uneven hue spread: ${buckets.join(",")}`);
-	}
-});
-
-test("every generated colour keeps white text readable and stands out from a black background", () =>
-{
-	for(let i = 0; i < 1000; i++)
-	{
-		const colour = colourForName(`Name ${i}`);
-		assert.ok(contrast(colour, "#ffffff") >= 4, `${colour} too light for white text`);
+		assert.ok(contrast(colour, "#ffffff") >= 4.4, `${colour} too light for white text`);
 		assert.ok(contrast(colour, "#000000") >= 2, `${colour} too dark on black`);
 	}
+	assert.equal(new Set(PALETTE).size, 16);
 });
 
-test("empty or missing names fall back to the index based colour", () =>
+test("empty or missing names use the aux position", () =>
 {
-	assert.equal(colourForName("", 2, 8), generateColour(8, 2).toLowerCase());
-	assert.equal(colourForName("   ", 0, 4), generateColour(4, 0).toLowerCase());
-	assert.equal(colourForName(undefined, 1, 4), generateColour(4, 1).toLowerCase());
-	//bad index/total doesn't throw
-	assert.match(colourForName("", 99, 4), /^#[0-9a-f]{6}$/);
-	assert.match(colourForName("", -1, 0), /^#[0-9a-f]{6}$/);
+	assert.equal(colourForName("", 2), PALETTE[2]);
+	assert.equal(colourForName(undefined, 17), PALETTE[1]);
+	assert.match(colourForName("", -1), /^#[0-9a-f]{6}$/);
+});
+
+test("assignColours never gives two auxes the same colour (up to 16 auxes)", () =>
+{
+	//the aux names from a real Quantum session, where plain hashing gave two auxes the same colour
+	const names = ["Aux 1", "Anything2", "Aux 3", "Snare Long Verb", "Gtr Verb", "Vocal Verb", "Aux 7", "Aux 8",
+		"Drums Verb", "Cimbal Verb", "Delay", "Raumzeit", "Aux 13", "Aux 14", "Aux 15", "Aux 16"];
+	const colours = assignColours(names);
+	assert.equal(colours.length, 16);
+	assert.equal(new Set(colours).size, 16);
+	for(let i = 0; i < 200; i++)
+	{
+		const some = Array.from({length: 1 + (i % 16)}, (_, n) => `Musician ${i}-${n}`);
+		const assigned = assignColours(some);
+		assert.equal(new Set(assigned).size, some.length);
+	}
+});
+
+test("assignColours keeps a name's own colour unless another aux already has it", () =>
+{
+	const colours = assignColours(["Bass IEM", "Keys IEM"]);
+	assert.equal(colours[0], colourForName("Bass IEM"));
+	//moving the aux to another number keeps its colour
+	assert.equal(assignColours(["New", "Other", "Bass IEM"]).includes(colourForName("Bass IEM")), true);
+	//more auxes than colours: the palette is reused, still well defined
+	assert.equal(assignColours(Array.from({length: 40}, (_, i) => "x" + i)).length, 40);
 });
 
 test("hslToHex converts known colours", () =>

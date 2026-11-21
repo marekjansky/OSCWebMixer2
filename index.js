@@ -32,6 +32,7 @@ const deviceLock = require('./lib/deviceLocks.js');
 const groupTrim = require('./lib/groupTrim.js');
 const channelLayout = require('./lib/channelLayout.js');
 const identity = require('./lib/identity.js');
+const colour = require('./lib/colour.js');
 const deskSync = require('./lib/deskSync.js');
 const oscValidation = require('./lib/oscValidation.js');
 const { createEchoTracker } = require('./lib/echoTracker.js');
@@ -283,6 +284,20 @@ function channelSettings(index)
 		group: slot?.group ?? "",
 		name: slot?.name
 	};
+}
+
+/**
+ * Automatic colour of every aux, worked out over all desk names so no two auxes share one.
+ * @returns {string[]} 0-based by aux
+ */
+function defaultAuxColours()
+{
+	const names = [];
+	for(let aux = 1; aux <= deskSync.auxCount(cache); aux++)
+	{
+		names.push(deskAuxName(aux));
+	}
+	return colour.assignColours(names);
 }
 
 /**
@@ -575,6 +590,7 @@ function buildConfig(deviceId = null)
 	let auxilaries = [];
 	if(cache.has(deskSync.AUX_MODES))
 	{
+		const defaults = defaultAuxColours();
 		let auxModes = cache.get(deskSync.AUX_MODES).args;
 		for(const [index, mode] of auxModes.entries())
 		{
@@ -590,7 +606,7 @@ function buildConfig(deviceId = null)
 				label: name,
 				channel: index + 1,
 				stereo: mode == 2,
-				colour: identity.effectiveAuxColour(currentState.auxes?.[index], name, index, auxModes.length),
+				colour: identity.effectiveAuxColour(currentState.auxes?.[index], name, defaults[index]),
 				icon: settings.icon,
 				changed: identity.isChanged(settings.name, name)
 			});
@@ -818,10 +834,17 @@ function reconcileNames()
 		return;
 	}
 	let stateChanged = false;
+	//a slot seen for the first time normally just learns its name, unless something moved there
+	//(then it waits for the engineer to follow the move, or its settings would be lost)
+	const moveTargets = type => new Set(identity.findMoves(type === "aux"
+		? {count: deskSync.auxCount(cache), deskName: deskAuxName, slots: currentState.auxes}
+		: {count: deskSync.channelCount(cache), deskName: deskChannelName, slots: currentState.channels}).map(move => move.to));
+	const auxTargets = moveTargets("aux");
+	const channelTargets = moveTargets("channel");
 	for(let aux = 1; aux <= deskSync.auxCount(cache); aux++)
 	{
 		const name = deskAuxName(aux);
-		if(identity.nameStatus(currentState.auxes?.[aux - 1]?.name, name) === "first")
+		if(!auxTargets.has(aux) && identity.nameStatus(currentState.auxes?.[aux - 1]?.name, name) === "first")
 		{
 			ensureSlot(currentState, "auxes", aux - 1).name = name;
 			stateChanged = true;
@@ -830,7 +853,7 @@ function reconcileNames()
 	for(let channel = 1; channel <= deskSync.channelCount(cache); channel++)
 	{
 		const name = deskChannelName(channel);
-		if(identity.nameStatus(currentState.channels?.[channel - 1]?.name, name) === "first")
+		if(!channelTargets.has(channel) && identity.nameStatus(currentState.channels?.[channel - 1]?.name, name) === "first")
 		{
 			ensureSlot(currentState, "channels", channel - 1).name = name;
 			stateChanged = true;
@@ -1354,6 +1377,14 @@ function startServer()
 		confirmIdentity(req, res);
 	});
 
+	app.post('/api/identity/follow', requireAdminAuth, (req, res) => {
+		followMoves(req, res);
+	});
+
+	app.post('/api/aux/:aux/sends', requireAdminAuth, (req, res) => {
+		switchAllSends(req, res);
+	});
+
 	app.get('/api/presets', requireAdminAuth, (req, res) => {
 		let presets = configManager.getPresets()
 
@@ -1574,6 +1605,7 @@ function startServer()
 		if(cache.has(deskSync.AUX_MODES))
 		{
 			const total = deskSync.auxCount(cache);
+			const defaults = defaultAuxColours();
 			for(let i=0; i<total; i++)
 			{
 				const name = deskAuxName(i + 1);
@@ -1587,7 +1619,7 @@ function startServer()
 					"number": i + 1,
 					"enabled": settings.enabled,
 					"name": name,
-					"colour": identity.effectiveAuxColour(currentState.auxes?.[i], name, i, total),
+					"colour": identity.effectiveAuxColour(currentState.auxes?.[i], name, defaults[i]),
 					"icon": settings.icon,
 					"previousName": changed ? settings.name : null
 				});
@@ -1743,11 +1775,15 @@ async function saveAdminForm(req, res)
 	if(auxEnabled && auxColour && auxIcon)
 	{
 		const auxNames = list(body.auxName) || [];
+		const defaults = defaultAuxColours();
 		nextState.auxes = auxEnabled.map((enabledValue, index) => {
 			const previous = currentState.auxes?.[index];
 			const slot = {
 				enabled: enabledValue === "true",
-				colour: auxColour[index],
+				//the form submits every aux's colour; one still showing its automatic colour keeps
+				//following the aux name rather than becoming a fixed custom colour
+				colour: (typeof previous?.colour !== "string" || previous.colour === "") && colour.sameColour(auxColour[index], defaults[index])
+					? "" : auxColour[index],
 				icon: auxIcon[index],
 				name: previous?.name
 			};
@@ -1964,6 +2000,122 @@ function confirmIdentity(req, res)
 	ensurePrimer();
 	pushConfigToAll();
 	res.json({ok: true});
+}
+
+/**
+ * Handle POST /api/aux/{aux}/sends {on: 0|1}: switch the send of every channel enabled in the
+ * webmixer on (or off) for one aux. Admin only. Sent in small batches so a busy network doesn't
+ * drop any; the desk's echoes update the mixers.
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ */
+function switchAllSends(req, res)
+{
+	const aux = Number(req.params.aux);
+	const on = (req.body || {}).on;
+	if(!Number.isInteger(aux) || aux < 1 || aux > deskSync.auxCount(cache) || (on !== 0 && on !== 1 && on !== true && on !== false))
+	{
+		return res.status(400).json({ok: false, message: "Expected an existing aux and {on: 0|1}."});
+	}
+	if(!loaded || computeDeskState() !== "online")
+	{
+		return res.status(409).json({ok: false, message: "The mixing desk is not online."});
+	}
+	const value = on === 1 || on === true ? 1 : 0;
+	const messages = [];
+	for(let channel = 1; channel <= deskSync.channelCount(cache); channel++)
+	{
+		if(channelSettings(channel - 1).enabled)
+		{
+			messages.push({address: deskSync.sendAddress(channel, aux, "on"), args: [value]});
+		}
+	}
+
+	const BATCH = 8;
+	const sendBatch = start =>
+	{
+		for(const msg of messages.slice(start, start + BATCH))
+		{
+			maybeCacheResponse(msg);
+			sendToDesk(msg);
+			sendToSockets(msg);
+		}
+		if(start + BATCH < messages.length)
+		{
+			setTimeout(() => sendBatch(start + BATCH), 20);
+		}
+	};
+	sendBatch(0);
+	logger.info(`Admin switched ${value ? "ON" : "OFF"} the sends of ${messages.length} channel(s) to aux ${aux} "${deskAuxName(aux) ?? ""}".`);
+	res.json({ok: true, count: messages.length});
+}
+
+/**
+ * Handle POST /api/identity/follow {type}: every aux (or channel) whose name moved to another
+ * number on the desk takes its settings, per-aux layout and device locks along. Slots whose
+ * occupant moved away and that nothing moved into start from defaults.
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ */
+function followMoves(req, res)
+{
+	const type = (req.body || {}).type;
+	if(type !== "aux" && type !== "channel")
+	{
+		return res.status(400).json({ok: false, message: "Expected {type: \"aux\"|\"channel\"}."});
+	}
+	if(!loaded)
+	{
+		return res.status(409).json({ok: false, message: "Still loading values from the mixing desk."});
+	}
+	const isAux = type === "aux";
+	const key = isAux ? "auxes" : "channels";
+	const deskName = isAux ? deskAuxName : deskChannelName;
+	const count = isAux ? deskSync.auxCount(cache) : deskSync.channelCount(cache);
+	const moves = identity.findMoves({count, deskName, slots: currentState[key]});
+	if(moves.length === 0)
+	{
+		return res.json({ok: true, moved: 0});
+	}
+
+	const nextState = structuredClone(currentState);
+	nextState[key] = identity.applyMovesToSlots(type, currentState[key], moves, deskName);
+	const nextLayouts = isAux ? identity.moveAuxLayouts(channelLayouts, moves) : identity.moveChannelsInLayouts(channelLayouts, moves);
+	const lockResult = isAux ? identity.moveLocks(deviceLocks, moves) : {locks: deviceLocks, moved: []};
+
+	//save each file before using it; stop at the first failure
+	try
+	{
+		configManager.saveCurrentState(nextState);
+		currentState = nextState;
+		configManager.saveChannelLayouts(nextLayouts);
+		channelLayouts = nextLayouts;
+		if(lockResult.moved.length)
+		{
+			configManager.saveDeviceLocks(lockResult.locks);
+			deviceLocks = lockResult.locks;
+		}
+	}
+	catch(e)
+	{
+		logger.error(`Failed to save the moved ${key}: ${e.message}`);
+		pushConfigToAll();
+		return res.status(500).json({ok: false, message: "Could not save: " + e.message});
+	}
+
+	const label = isAux ? "Aux" : "Channel";
+	for(const move of moves)
+	{
+		logger.info(`${label} "${move.name}" moved on the desk from ${move.from} to ${move.to}; its settings followed.`);
+	}
+	if(lockResult.moved.length)
+	{
+		logger.info(`${lockResult.moved.length} locked device(s) followed their aux.`);
+	}
+	queryPacer.reset();
+	ensurePrimer();
+	pushConfigToAll();
+	res.json({ok: true, moved: moves.length});
 }
 
 /**
