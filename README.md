@@ -58,6 +58,26 @@ Basic Auth on the admin area:
 mix with the padlock button. Without it anyone can unlock a device from the mixer. Locks are tied to
 the browser, so clearing the browser's site data also releases a device.
 
+## Download (no Node.js needed)
+
+Ready-to-run builds for Windows, macOS (Apple Silicon and Intel) and Linux are attached to each
+[GitHub release](../../releases). Download the zip for your platform, unzip it anywhere and start it:
+
+- **Windows:** double-click `start.bat` (restarts the server automatically if it stops). Allow it through
+  the Windows firewall when asked.
+- **macOS:** the builds are not notarized by Apple, so macOS blocks them at first. Open Terminal in the
+  unzipped folder and run `xattr -dr com.apple.quarantine .` once, then double-click `start.command`.
+- **Linux:** run `./start.sh`. Ports below 1024 (such as the default web port 80) need root or
+  `sudo setcap cap_net_bind_service=+ep OSCWebMixer2`.
+
+Settings are stored in a `config` folder next to the program, and plugins are loaded from the `plugins`
+folder next to it. To update, replace the program but keep `config`.
+
+**Making a release (maintainers):** set `version` in `package.json`, commit, then push a matching tag
+(`git tag v2.6.0 && git push --tags`). The `release` workflow tests, builds every platform natively,
+checks each build starts, and publishes the release with checksums. Tags with a dash (`v2.6.0-beta.1`)
+become pre-releases.
+
 ## Basic Setup Instructions
 
 1. Download repository and navigate to the directory in a shell.
@@ -117,6 +137,18 @@ docker compose up -d
 ```bash
 docker compose logs -f webmixer
 ```
+
+## Running a show
+
+* **Health check** - `GET /healthz` (no login) returns `{"ok":true,"loaded":true,"desk":"online"}`. `desk` is `online`, `offline` (desk silent for more than 10 s) or `loading`. Use it for monitoring; Docker uses it for its `HEALTHCHECK`.
+* **Status page** - the **Status** tab in `/admin` refreshes every 3 seconds and shows the desk state (with IP:port and time since its last reply) and every connected client (device id, IP, locked mix, connected since, last seen). A red/orange banner at the top of every admin tab appears whenever the desk is offline or the server is still loading.
+* **Identity-change banners** - if the desk reports a different name for an aux or channel than the one webmixer last knew (e.g. someone renamed or re-patched "Aux 5: Bass IEM" to "Keys IEM"), the admin page shows an orange banner. Settings for that slot (colour, icon, title, group, per-mix layout) are held, and any device locked to a changed aux is suspended - it can't send anything until you decide. Choose **Keep settings** if it is the same musician/channel with a new label, or **Reset to defaults** if the slot now belongs to something else. Changed rows are highlighted in the Auxiliaries/Channels lists.
+* **Saving settings** no longer disconnects the mixers; they receive the new configuration live. Only changing the web port drops clients.
+* **Restart automatically** - run the server under something that restarts it:
+  * Windows: `windows-start.bat` restarts node 3 seconds after it exits and logs each restart to `restarts.log`.
+  * Docker: `restart: unless-stopped`, log rotation (10 MB x 5) and a healthcheck are set in `docker-compose.yaml`. Check with `docker compose ps` (shows `healthy`) and `docker compose logs -f webmixer`.
+  * Linux without Docker: a systemd unit with `Restart=always`.
+* Docker runs as the non-root `node` user; the Dockerfile grants node the `cap_net_bind_service` capability so it can still bind port 80 under `network_mode: host`. The mounted `./config` folder must be writable by the container's `node` user (uid 1000), e.g. `chown -R 1000:1000 config`.
 
 ## FAQs
 

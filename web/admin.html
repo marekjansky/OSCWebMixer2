@@ -20,9 +20,12 @@
 </head>
 
 <body class="disconnected">
+	<div id="deskBanner" class="banner banner-bad" role="alert" hidden></div>
+	<div id="identityBanner" class="banner banner-warn" hidden></div>
 	
 	<nav id="mainNav">
 		<ul>
+			<li><a href="#status">Status<div class="status-dot" id="navStatusDot"></div></a></li>
 			<li><a href="#global" class="selected">Global Settings<div class="status"></div></a></li>
 			<li><a href="#aux">Auxiliaries</a></li>
 			<li><a href="#channels">Channels</a></li>
@@ -40,6 +43,13 @@
 				OSCWebMixer is free to use but has taken quite a bit of time to develop. Please consider making a donation if you find it useful and would like to see future development. 
 				<img src="/images/money.svg" width="40" height="40" alt="Money Icon" />
 			</a>
+
+			<section id="status-content">
+				<div class="tips">Live server status, refreshed every 3 seconds.</div>
+				<div id="status-desk" class="status-card"></div>
+				<h2>Connected clients</h2>
+				<div id="status-clients" class="device-list"></div>
+			</section>
 
 			<section id="global-content" class="show">
 				<div class="grid-container">
@@ -63,7 +73,8 @@
 
 			<section id="aux-content">
 				<div class="button-row">
-					<button type="button" class="toggle-selection">Select All/None</button>
+					<button type="button" class="enable-all">Enable all</button>
+					<button type="button" class="disable-all">Disable all</button>
 					<button type="button" class="invert-selection">Invert Selection</button>
 				</div>
 				<div id="auxiliaries" class="list"></div>
@@ -71,7 +82,8 @@
 
 			<section id="channels-content">
 				<div class="button-row">
-					<button type="button" class="toggle-selection">Select All/None</button>
+					<button type="button" class="enable-all">Enable all</button>
+					<button type="button" class="disable-all">Disable all</button>
 					<button type="button" class="invert-selection">Invert Selection</button>
 				</div>
 				<div id="channels" class="list"></div>

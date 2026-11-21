@@ -14,7 +14,35 @@ channels = document.getElementById("channels"),
 iconDialog = document.getElementById("iconDialog");
 
 let ws = null,
-timeout = null;
+timeout = null,
+lastRx = 0,
+formDirty = false,
+authAlerted = false;
+
+/**
+ * fetch wrapper for the authenticated admin API. The browser already holds the
+ * Basic-Auth credentials for this origin, so requests just work; if the server
+ * still answers 401 (password changed, credentials dropped) say so instead of
+ * failing with a confusing JSON parse error.
+ * @param {string} url
+ * @param {object} options - fetch options
+ * @returns {Promise<Response>}
+ */
+async function apiFetch(url, options = {})
+{
+	const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options));
+	if(response.status == 401)
+	{
+		if(!authAlerted)
+		{
+			authAlerted = true;
+			alert("Authentication required. Reload this page and log in again.");
+			setTimeout(() => { authAlerted = false; }, 30000);
+		}
+		throw new Error("Not authorised (401)");
+	}
+	return response;
+}
 
 /**
  * Callback for delete button for external devices
@@ -186,7 +214,7 @@ async function submitConfigForm()
 		return false;
 	}
 
-	const response = await fetch(configForm.action, {
+	const response = await apiFetch(configForm.action, {
 		method: "POST",
 		body: new URLSearchParams(new FormData(configForm))
 	});
@@ -200,8 +228,19 @@ async function submitConfigForm()
 		return false;
 	}
 
+	if(!response.ok)
+	{
+		alert("Saving the settings failed: " + (text.replace(/<[^>]*>/g, "").trim().slice(0, 200) || response.status));
+		return false;
+	}
+
+	//the server no longer disconnects clients on save, so refresh the lists ourselves
+	reloadLists();
 	return true;
 }
+
+configForm.addEventListener("input", () => { formDirty = true; });
+configForm.addEventListener("change", () => { formDirty = true; });
 
 configForm.addEventListener("submit", async (e) => {
 	e.preventDefault();
@@ -317,9 +356,29 @@ function addIconPicker(element, name, icon)
  * @param {string} colour - the colour of the auxilary
  * @param {string} icon - the icon for the auxilary
  */
-function createAux(number, enabled, name, colour, icon)
+/**
+ * Highlight a list row whose desk name changed and hasn't been confirmed
+ * @param {DomElement} row
+ * @param {string|null} previousName
+ */
+function markChanged(row, previousName)
+{
+	if(previousName === null || previousName === undefined)
+	{
+		return;
+	}
+	row.classList.add("changed-row");
+	row.title = "Changed on the desk, was '" + previousName + "'. Confirm it on the Status tab.";
+	const note = document.createElement("span");
+	note.className = "changed-note";
+	note.textContent = "was '" + previousName + "'";
+	row.appendChild(note);
+}
+
+function createAux(number, enabled, name, colour, icon, previousName = null)
 {
 	let auxWrap = document.createElement("div");
+	markChanged(auxWrap, previousName);
 
 	let channelNumberLabel = document.createElement("label");
 	channelNumberLabel.className = "listNumber";
@@ -413,9 +472,10 @@ function movedown(e)
  * @param {string} title - the section title
  * @param {string} group - the id of the group the channel belongs to
  */
-function createChannel(number, enabled, name, order, icon="", title="", group="")
+function createChannel(number, enabled, name, order, icon="", title="", group="", previousName = null)
 {
 	let channelWrap = document.createElement("div");
+	markChanged(channelWrap, previousName);
 	channelWrap.style.order = order;
 
 	let channelNumberLabel = document.createElement("label");
@@ -478,7 +538,7 @@ function createChannel(number, enabled, name, order, icon="", title="", group=""
 
 /**
  * Find the enable checkboxes for the list a selection button belongs to. Each
- * pair of buttons sits in a .button-row inside the same <section> as the list
+ * set of buttons sits in a .button-row inside the same <section> as the list
  * it controls.
  * @param {DomElement} button - the clicked selection button
  * @returns {NodeListOf<HTMLInputElement>}
@@ -489,20 +549,15 @@ function selectionCheckboxes(button)
 }
 
 /**
- * Toggle a list's enable checkboxes: if every box is already checked, uncheck
- * them all, otherwise check them all.
- * @param {MouseEvent} e
+ * Set every enable checkbox in a list to the same state.
+ * @param {DomElement} button - the clicked selection button
+ * @param {boolean} checked
  */
-function toggleSelection(e)
+function setSelection(button, checked)
 {
-	e.preventDefault();
-
-	let checkboxes = selectionCheckboxes(this);
-	let allChecked = [...checkboxes].every((checkbox) => checkbox.checked);
-
-	for(let checkbox of checkboxes)
+	for(let checkbox of selectionCheckboxes(button))
 	{
-		checkbox.checked = !allChecked;
+		checkbox.checked = checked;
 		checkbox.dispatchEvent(new Event("change"));
 	}
 }
@@ -522,9 +577,13 @@ function invertSelection(e)
 	}
 }
 
-for(let button of document.querySelectorAll(".toggle-selection"))
+for(let button of document.querySelectorAll(".enable-all"))
 {
-	button.addEventListener("click", toggleSelection);
+	button.addEventListener("click", function(e) { e.preventDefault(); setSelection(this, true); });
+}
+for(let button of document.querySelectorAll(".disable-all"))
+{
+	button.addEventListener("click", function(e) { e.preventDefault(); setSelection(this, false); });
 }
 for(let button of document.querySelectorAll(".invert-selection"))
 {
@@ -612,7 +671,7 @@ function fetchAux()
 
 			for(let [index, aux] of json.entries())
 			{
-				createAux(index + 1, aux.enabled, aux.name, aux.colour, aux.icon);
+				createAux(index + 1, aux.enabled, aux.name, aux.colour, aux.icon, aux.previousName ?? null);
 			}
 		});
 }
@@ -635,7 +694,7 @@ function fetchChannels()
 
 			for(let [index, channel] of json.entries())
 			{
-				createChannel(index + 1, channel.enabled, channel.name, channel.order, channel.icon, channel.title, channel.group || "");
+				createChannel(index + 1, channel.enabled, channel.name, channel.order, channel.icon, channel.title, channel.group || "", channel.previousName ?? null);
 			}
 
 			ensureValidOrder(channels.childNodes, "channelOrder[]");
@@ -643,6 +702,19 @@ function fetchChannels()
 		});
 }
 fetchChannels();
+
+/**
+ * Reload every list from the server (after a save, or when the server pushes a new config)
+ */
+function reloadLists()
+{
+	loadConfig();
+	fetchAux();
+	fetchGroups();
+	fetchChannels();
+	formDirty = false;
+	staleNotice.hidden = true;
+}
 
 /**
  * Make sure the order of node elements are valid.
@@ -722,10 +794,38 @@ function onMessage(e)
 		return;
 	}
 
-	//console.log(json);
+	//any message counts as liveness (see the watchdog below)
+	lastRx = Date.now();
+
+	//the server pushes a fresh config whenever the desk structure, a preset or the admin settings change
+	if(json.config)
+	{
+		if(formDirty)
+		{
+			showStaleNotice();
+		}
+		else
+		{
+			reloadLists();
+		}
+		pollStatus();
+		return;
+	}
 
 	if(!json.address)
 	{
+		return;
+	}
+
+	if(json.address == "/Webmixer/Status")
+	{
+		try
+		{
+			applyDeskState(JSON.parse(json.args[0]).desk);
+		}
+		catch(err)
+		{
+		}
 		return;
 	}
 
@@ -775,15 +875,18 @@ function onOpen()
 
 	document.body.classList.remove("disconnected");
 
-	/*
-	Sockets close and open again when the config is saved. We want to make sure we have the latest when the socket is opened.
-	TODO: This isn't the most elegant solution and it might be better to save & reload the config using the websocket.
-	*/
-	loadConfig();
-	fetchAux();
-	fetchGroups();
-	fetchChannels();
-	
+	lastRx = Date.now();
+
+	//make sure we have the latest whenever the socket (re)connects, unless the user is mid-edit
+	if(formDirty)
+	{
+		showStaleNotice();
+	}
+	else
+	{
+		reloadLists();
+	}
+	pollStatus();
 }
 
 /**
@@ -806,7 +909,8 @@ function startWebsocket()
 	{
 		ws.close();
 	}
-	ws = new WebSocket("ws://" + document.location.host);
+	ws = new WebSocket((document.location.protocol == "https:" ? "wss://" : "ws://") + document.location.host);
+	lastRx = Date.now();
 	ws.onopen = onOpen;
 	ws.onmessage = onMessage;
 	ws.onclose = noConnection;
@@ -820,9 +924,29 @@ function startWebsocket()
 
 startWebsocket();
 
+//the server sends a keep-alive every 5 s; more than 12 s of silence means the connection is dead
+setInterval(() => {
+	if(ws && ws.readyState == WebSocket.OPEN && Date.now() - lastRx > 12000)
+	{
+		const dead = ws;
+		ws = null;
+		dead.onclose = dead.onerror = dead.onmessage = null;
+		try { dead.close(); } catch(err) {}
+		noConnection();
+	}
+}, 2000);
+
+/**
+ * Tell the user the server changed things while they have unsaved edits
+ */
+function showStaleNotice()
+{
+	staleNotice.hidden = false;
+}
+
 
 function refreshPresetList() {
-    fetch('/api/presets')
+    apiFetch('/api/presets')
         .then(res => {
             if (!res.ok) throw new Error('Network response was not ok');
             return res.json();
@@ -882,7 +1006,7 @@ async function savePreset() {
 			return;
 		}
 
-		const response = await fetch('/api/presets/save-current-state', {
+		const response = await apiFetch('/api/presets/save-current-state', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ name })
@@ -919,16 +1043,14 @@ async function loadPreset(event) {
 	const presetName = presetItem.querySelector('.name').textContent;
 
 	if (confirm(`Load preset "${presetName}"?`)) {
-		const response = await fetch(`/api/presets/${uuid}/load`, { method: 'POST' });
+		const response = await apiFetch(`/api/presets/${uuid}/load`, { method: 'POST' });
 		if (!response.ok) {
 			const data = await response.json();
 			alert(data.message);
 			return;
 		}
 
-		fetchAux();
-		fetchGroups();
-		fetchChannels();
+		reloadLists();
 	}
 }
 
@@ -940,7 +1062,7 @@ async function deletePreset(event) {
 	const presetName = presetItem.querySelector('.name').textContent;
 
 	if (confirm(`Delete preset "${presetName}"?`)) {
-		const response = await fetch(`/api/presets/${uuid}`, { method: 'DELETE' });
+		const response = await apiFetch(`/api/presets/${uuid}`, { method: 'DELETE' });
 		if (!response.ok) {
 			const data = await response.json();
 			alert(data.message);
@@ -1042,7 +1164,7 @@ function createDeviceRow(device, auxes)
  */
 async function deviceAction(id, action, body = {})
 {
-	const response = await fetch("/api/devices/" + encodeURIComponent(id) + "/" + action, {
+	const response = await apiFetch("/api/devices/" + encodeURIComponent(id) + "/" + action, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(body)
@@ -1071,7 +1193,7 @@ async function refreshDeviceList()
 	try
 	{
 		const [devicesResponse, auxResponse] = await Promise.all([
-			fetch("/api/devices", { cache: "no-store" }),
+			apiFetch("/api/devices", { cache: "no-store" }),
 			fetch("/aux", { cache: "no-store" })
 		]);
 		const { devices, unlockNeedsPassword } = await devicesResponse.json();
@@ -1224,3 +1346,235 @@ function fetchGroups()
 		});
 }
 fetchGroups();
+
+
+/**
+ * Status tab, desk banner and identity-change banner
+ */
+const deskBanner = document.getElementById("deskBanner"),
+identityBanner = document.getElementById("identityBanner"),
+statusDesk = document.getElementById("status-desk"),
+statusClients = document.getElementById("status-clients"),
+navStatusDot = document.getElementById("navStatusDot"),
+staleNotice = document.createElement("div");
+
+staleNotice.className = "banner banner-warn";
+staleNotice.hidden = true;
+staleNotice.appendChild(document.createTextNode("The server's configuration changed while you have unsaved edits. "));
+{
+	const reload = document.createElement("button");
+	reload.type = "button";
+	reload.textContent = "Discard my edits and reload";
+	reload.addEventListener("click", () => { staleNotice.hidden = true; reloadLists(); });
+	staleNotice.appendChild(reload);
+	document.body.insertBefore(staleNotice, document.body.firstChild);
+}
+
+let statusFailures = 0;
+
+/**
+ * Format a duration in ms as a short "x s ago" string
+ * @param {number|null} ms
+ * @returns {string}
+ */
+function ago(ms)
+{
+	if(ms === null || ms === undefined)
+	{
+		return "never";
+	}
+	const s = Math.round(ms / 1000);
+	if(s < 60) return s + " s ago";
+	if(s < 3600) return Math.floor(s / 60) + " min " + (s % 60) + " s ago";
+	return Math.floor(s / 3600) + " h " + Math.floor((s % 3600) / 60) + " min ago";
+}
+
+/**
+ * Show the desk state in the banner and on the nav dot (used by both the status poll and the websocket)
+ * @param {string} state - "online", "offline", "loading" or "unreachable"
+ * @param {object} desk - optional desk details from /api/status
+ */
+function applyDeskState(state, desk)
+{
+	navStatusDot.className = "status-dot " + (state || "");
+	if(state == "online")
+	{
+		deskBanner.hidden = true;
+		return;
+	}
+	const target = desk && desk.ip ? " (" + desk.ip + ":" + desk.port + ")" : "";
+	let text;
+	if(state == "offline") text = "MIXING DESK NOT RESPONDING" + target + ". Musicians' faders are disabled and values may be stale.";
+	else if(state == "loading") text = "Waiting for the mixing desk" + target + ". Loading desk data, mixers are on hold.";
+	else if(state == "unreachable") text = "Cannot reach the webmixer server. Status unknown.";
+	else return;
+	deskBanner.textContent = text;
+	deskBanner.hidden = false;
+}
+
+/**
+ * Render the "desk name changed" banner
+ * @param {Array} changes - identityChanges from /api/status
+ */
+function renderIdentityChanges(changes)
+{
+	//don't rebuild while a button is being pressed/confirmed
+	const key = JSON.stringify(changes);
+	if(identityBanner.dataset.key === key)
+	{
+		return;
+	}
+	identityBanner.dataset.key = key;
+
+	identityBanner.innerHTML = "";
+	identityBanner.hidden = changes.length == 0;
+	if(changes.length == 0)
+	{
+		return;
+	}
+
+	const title = document.createElement("div");
+	title.textContent = "The desk reports changed names. Confirm what should happen to the settings:";
+	identityBanner.appendChild(title);
+
+	for(const change of changes)
+	{
+		const row = document.createElement("div");
+		row.className = "identity-change";
+		const label = change.type == "aux" ? "Aux" : "Channel";
+		row.appendChild(document.createTextNode(label + " " + change.number + " was '" + change.previousName + "', now '" + change.currentName + "'"));
+
+		for(const [text, keep] of [["Keep settings", true], ["Reset to defaults", false]])
+		{
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = text;
+			button.addEventListener("click", () => confirmIdentity(change, keep, row));
+			row.appendChild(button);
+		}
+		identityBanner.appendChild(row);
+	}
+}
+
+/**
+ * Confirm an identity change
+ */
+async function confirmIdentity(change, keepSettings, row)
+{
+	if(!keepSettings && !confirm("Reset " + change.type + " " + change.number + " to defaults? Its colour, icon, title and group will be cleared."))
+	{
+		return;
+	}
+	for(const button of row.querySelectorAll("button"))
+	{
+		button.disabled = true;
+	}
+	try
+	{
+		const response = await apiFetch("/api/identity/confirm", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ type: change.type, number: change.number, keepSettings })
+		});
+		if(!response.ok)
+		{
+			throw new Error("Server answered " + response.status);
+		}
+		await pollStatus();
+		if(!formDirty)
+		{
+			reloadLists();
+		}
+	}
+	catch(err)
+	{
+		alert("Could not confirm: " + err.message);
+		for(const button of row.querySelectorAll("button"))
+		{
+			button.disabled = false;
+		}
+	}
+}
+
+/**
+ * Render the Status tab
+ * @param {object} status - response from /api/status
+ */
+function renderStatus(status)
+{
+	const desk = status.desk || {};
+	statusDesk.className = "status-card " + (desk.state || "");
+	statusDesk.innerHTML = "";
+	const state = document.createElement("div");
+	state.className = "state";
+	state.textContent = "Desk: " + (desk.state || "unknown");
+	statusDesk.appendChild(state);
+	const detail = document.createElement("div");
+	detail.textContent = (desk.ip ? desk.ip + ":" + desk.port : "no desk IP set") + " - last reply " + ago(desk.lastRxAgoMs) + (status.loaded ? "" : " - not fully loaded yet");
+	statusDesk.appendChild(detail);
+
+	statusClients.innerHTML = "";
+	const clients = status.clients || [];
+	if(clients.length == 0)
+	{
+		statusClients.innerHTML = '<p class="notice">No clients connected</p>';
+		return;
+	}
+	const table = document.createElement("table");
+	table.className = "status-table";
+	const head = table.createTHead().insertRow();
+	for(const h of ["Device", "IP", "Locked aux", "Connected since", "Last seen"])
+	{
+		const th = document.createElement("th");
+		th.textContent = h;
+		head.appendChild(th);
+	}
+	const body = table.createTBody();
+	for(const client of clients)
+	{
+		const tr = body.insertRow();
+		const since = client.connectedAt ? new Date(client.connectedAt).toLocaleTimeString() : "";
+		const cells = [
+			client.deviceId ? client.deviceId.slice(0, 8) : "(admin / external)",
+			client.ip || "",
+			client.lockedAux ? "Aux " + client.lockedAux : "-",
+			since,
+			ago(client.lastSeenAgoMs)
+		];
+		for(const text of cells)
+		{
+			tr.insertCell().textContent = text;
+		}
+	}
+	statusClients.appendChild(table);
+}
+
+/**
+ * Poll /api/status and update the status tab and banners
+ */
+async function pollStatus()
+{
+	try
+	{
+		const response = await fetch("/api/status", { cache: "no-store", credentials: "same-origin" });
+		if(!response.ok)
+		{
+			throw new Error("Status " + response.status);
+		}
+		const status = await response.json();
+		statusFailures = 0;
+		applyDeskState(status.desk && status.desk.state, status.desk);
+		renderStatus(status);
+		renderIdentityChanges(status.identityChanges || []);
+	}
+	catch(err)
+	{
+		if(++statusFailures >= 2)
+		{
+			applyDeskState("unreachable");
+		}
+	}
+}
+
+setInterval(pollStatus, 3000);
+pollStatus();
