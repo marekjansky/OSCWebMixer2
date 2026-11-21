@@ -65,8 +65,10 @@ test("wantedQueries: names first, then enabled sends only, within the desk's cou
 		"/Aux_Outputs/2/Buss_Trim/name/?",
 		"/Input_Channels/3/Channel_Input/name/?",
 		"/Input_Channels/1/Aux_Send/1/send_pan/?",
+		"/Input_Channels/1/Aux_Send/1/send_on/?",
 		"/Input_Channels/3/Aux_Send/1/send_level/?",
-		"/Input_Channels/3/Aux_Send/1/send_pan/?"
+		"/Input_Channels/3/Aux_Send/1/send_pan/?",
+		"/Input_Channels/3/Aux_Send/1/send_on/?"
 	]);
 });
 
@@ -78,7 +80,8 @@ test("wantedQueries: stale cached values are re-requested", () =>
 		"/Aux_Outputs/1/Buss_Trim/name": ["A"],
 		"/Input_Channels/1/Channel_Input/name": ["Kick"],
 		"/Input_Channels/1/Aux_Send/1/send_level": [-10],
-		"/Input_Channels/1/Aux_Send/1/send_pan": [0.5]
+		"/Input_Channels/1/Aux_Send/1/send_pan": [0.5],
+		"/Input_Channels/1/Aux_Send/1/send_on": [1]
 	});
 	const enabled = {channelEnabled: () => true, auxEnabled: () => true};
 	assert.deepEqual(wantedQueries(cache, enabled), []);

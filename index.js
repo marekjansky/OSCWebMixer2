@@ -2336,7 +2336,7 @@ function resyncFromDesk()
 	for(const address of cache.keys())
 	{
 		if(address === deskSync.CHANNEL_COUNT || address === deskSync.AUX_MODES ||
-			/\/(send_level|send_pan|Buss_Trim\/name|Channel_Input\/name)$/.test(address))
+			/\/(send_level|send_pan|send_on|Buss_Trim\/name|Channel_Input\/name)$/.test(address))
 		{
 			staleAddresses.add(address);
 		}
@@ -2737,6 +2737,7 @@ function maybeCacheResponse(msg)
 	let matchAddresses = [
 		/^\/Input_Channels\/(\d{1,3})\/Aux_Send\/(\d{1,3})\/send_level$/, //cache channel aux level
 		/^\/Input_Channels\/(\d{1,3})\/Aux_Send\/(\d{1,3})\/send_pan$/, //cache channel aux pan
+		/^\/Input_Channels\/(\d{1,3})\/Aux_Send\/(\d{1,3})\/send_on$/, //cache channel aux send on/off
 		/^\/Input_Channels\/(\d{1,3})\/Channel_Input\/name$/, //cache channel name
 		/^\/Aux_Outputs\/(\d{1,3})\/Buss_Trim\/name$/, //cache aux name
 		/^\/Console\/Aux_Outputs\/modes$/, //cache aux modes (stereo or mono)

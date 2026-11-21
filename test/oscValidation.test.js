@@ -97,3 +97,17 @@ test("external devices: any address, but send values are checked", () =>
 	assert.deepEqual(sanitizeExternalMessage({address: LEVEL + "/?"}), {address: LEVEL + "/?", args: []});
 	assert.equal(sanitizeExternalMessage({}), null);
 });
+
+test("send on/off accepts only 0/1 (or true/false) and sends an integer", () =>
+{
+	const ON = "/Input_Channels/3/Aux_Send/2/send_on";
+	assert.deepEqual(parseSendAddress(ON), {channel: 3, aux: 2, param: "on", query: false});
+	assert.deepEqual(sanitizeClientMessage({address: ON, args: [1]}), {ok: true, msg: {address: ON, args: [1]}});
+	assert.deepEqual(sanitizeClientMessage({address: ON, args: [false]}), {ok: true, msg: {address: ON, args: [0]}});
+	for(const bad of [0.5, 2, -1, "1", NaN])
+	{
+		assert.equal(sanitizeClientMessage({address: ON, args: [bad]}).ok, false, String(bad));
+	}
+	assert.equal(sanitizeExternalMessage({address: ON, args: [7]}), null);
+	assert.equal(sanitizeClientMessage({address: ON + "/?", args: []}).ok, true);
+});

@@ -101,7 +101,7 @@ const state = {
 	auxName: (n) => AUX_NAMES[(n - 1) % AUX_NAMES.length] || `Aux ${n}`,
 	snapshotIndex: 1,
 	snapshotNames: ["Default", "Walk In", "Band 1", "Support", "Headliner", "Walk Out"],
-	// live send level (dB) / pan (0..1) values, keyed by OSC address, lazily defaulted
+	// live send level (dB) / pan (0..1) / on (0|1) values, keyed by OSC address, lazily defaulted
 	sends: new Map()
 };
 
@@ -110,6 +110,12 @@ const state = {
  */
 function defaultSend(address)
 {
+	if(address.endsWith("send_on"))
+	{
+		// mostly on; every 5th channel off so the mixer shows both states
+		const ch = parseInt(address.split("/")[2], 10);
+		return ch % 5 === 0 ? 0 : 1;
+	}
 	return address.endsWith("send_pan") ? 0.5 : -12;
 }
 
@@ -190,7 +196,7 @@ udpPort.on("message", function(oscMsg, timeTag, info)
 			return reply("/Snapshots/name", [state.snapshotIndex, name]);
 		}
 
-		if((m = q.match(/^\/Input_Channels\/\d+\/Aux_Send\/\d+\/send_(level|pan)$/)))
+		if((m = q.match(/^\/Input_Channels\/\d+\/Aux_Send\/\d+\/send_(level|pan|on)$/)))
 		{
 			const value = state.sends.has(q) ? state.sends.get(q) : defaultSend(q);
 			return reply(q, [value]);
@@ -201,7 +207,7 @@ udpPort.on("message", function(oscMsg, timeTag, info)
 	}
 
 	// --- a value being set by a web client (forwarded through webmixer) ---
-	let m = address.match(/^\/Input_Channels\/\d+\/Aux_Send\/\d+\/send_(level|pan)$/);
+	let m = address.match(/^\/Input_Channels\/\d+\/Aux_Send\/\d+\/send_(level|pan|on)$/);
 	if(m && oscMsg.args && oscMsg.args.length)
 	{
 		state.sends.set(address, oscMsg.args[0]);

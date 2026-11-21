@@ -88,3 +88,10 @@ test("self unlock requires the admin password when one is set", () =>
 	assert.equal(canSelfUnlock("s3cret", ""), false);
 	assert.equal(canSelfUnlock("s3cret", undefined), false);
 });
+
+test("locked device may switch sends on/off on its own aux only", () =>
+{
+	assert.equal(isAddressAllowedForAux("/Input_Channels/1/Aux_Send/3/send_on", 3), true);
+	assert.equal(isAddressAllowedForAux("/Input_Channels/1/Aux_Send/3/send_on/?", 3), true);
+	assert.equal(isAddressAllowedForAux("/Input_Channels/1/Aux_Send/4/send_on", 3), false);
+});

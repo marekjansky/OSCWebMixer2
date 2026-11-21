@@ -31,6 +31,8 @@ const TAP_MAX_MS = 300;
 const DOUBLE_TAP_MS = 350;
 /** A config held back because a fader is being touched is applied anyway after this long */
 const CONFIG_HOLD_MAX = 10000;
+//how long a send's ON button must be held to switch the send on (off is a single tap)
+const HOLD_TO_TURN_ON_MS = 600;
 
 let ws = null,
 connectTimer = null,
@@ -46,6 +48,7 @@ hiddenAt = 0,
 channelInputs = new Map(), //channel number => volume slider
 panInputs = new Map(), //channel number => pan slider
 groupInputs = new Map(), //group id => group trim slider
+onButtons = new Map(), //channel number => send on/off button
 known = new Map(), //OSC address => {value, db} last known send level/pan/group level, any aux
 activeSliders = new Set(), //sliders being touched or dragged with the mouse
 touches = new Map(), //touch identifier => {slider, x, y}
@@ -331,6 +334,10 @@ function refreshSlider(slider)
  */
 function refreshAllSliders()
 {
+	for(const button of onButtons.values())
+	{
+		refreshOnButton(button);
+	}
 	for(const map of [channelInputs, panInputs, groupInputs])
 	{
 		for(const slider of map.values())
@@ -491,6 +498,7 @@ function requestValues()
 	{
 		sendOSC("/Input_Channels/" + channel + "/Aux_Send/" + aux + "/send_level/?");
 		sendOSC("/Input_Channels/" + channel + "/Aux_Send/" + aux + "/send_pan/?");
+		sendOSC(onAddress(channel, aux) + "/?");
 	}
 	for(const group of groupInputs.keys())
 	{
@@ -631,7 +639,21 @@ function onMessage(e)
 	}
 
 	//update level or pan
-	const send = json.address.match(/^\/Input_Channels\/([0-9]+)\/Aux_Send\/([0-9]+)\/send_(level|pan)$/);
+	const send = json.address.match(/^\/Input_Channels\/([0-9]+)\/Aux_Send\/([0-9]+)\/send_(level|pan|on)$/);
+	if(send !== null && send[3] == "on")
+	{
+		const on = Number(args[0]);
+		if(Number.isFinite(on))
+		{
+			known.set(json.address, { value: on ? 1 : 0 });
+			const button = onButtons.get(send[1]);
+			if(button && send[2] == selectedAux())
+			{
+				refreshOnButton(button);
+			}
+		}
+		return;
+	}
 	if(send !== null)
 	{
 		let v;
@@ -1297,6 +1319,164 @@ function resetSlider(slider)
  * @param {boolean} changed - the name changed on the desk and hasn't been confirmed
  * @returns {{label: HTMLLabelElement, input: HTMLInputElement}}
  */
+/**
+ * The desk address of a channel's send on/off switch on an aux
+ * @param {string|number} channel
+ * @param {string|number} aux
+ * @returns {string}
+ */
+function onAddress(channel, aux)
+{
+	return "/Input_Channels/" + channel + "/Aux_Send/" + aux + "/send_on";
+}
+
+/**
+ * Show a send's on/off state on the selected aux: lit, unlit, or unknown. A send that is off
+ * dims its fader (which can still be set, ready for switching the send on).
+ * @param {HTMLButtonElement} button
+ */
+function refreshOnButton(button)
+{
+	const aux = selectedAux();
+	const v = aux === undefined ? undefined : known.get(onAddress(button.dataset.channel, aux));
+	const state = v ? (v.value ? "on" : "off") : "unknown";
+	if(button.dataset.state !== state)
+	{
+		button.dataset.state = state;
+		button.setAttribute("aria-pressed", state == "on" ? "true" : "false");
+		button.title = state == "on" ? "Send is on. Tap to turn it off."
+			: state == "off" ? "Send is off. Press and hold to turn it on."
+			: "Send on/off not known yet";
+	}
+	const label = button.closest("label");
+	if(label)
+	{
+		label.classList.toggle("sendOff", state == "off");
+	}
+	if(state != "off")
+	{
+		cancelHold(button);
+	}
+}
+
+/**
+ * Stop a press-and-hold that would switch a send on
+ * @param {HTMLButtonElement} button
+ */
+function cancelHold(button)
+{
+	if(button.holdTimer)
+	{
+		clearTimeout(button.holdTimer);
+		button.holdTimer = null;
+	}
+	button.classList.remove("holding");
+}
+
+/**
+ * Switch a send on or off on the selected aux
+ * @param {HTMLButtonElement} button
+ * @param {0|1} on
+ */
+function setSendOn(button, on)
+{
+	const address = onAddress(button.dataset.channel, selectedAux());
+	known.set(address, { value: on });
+	refreshOnButton(button);
+	sendOSC(address, [on]);
+}
+
+/**
+ * Pressing a send's ON button. Turning a send off is immediate (that's the safe direction).
+ * Turning it on needs a press and hold, so a stray touch can't suddenly add a channel to
+ * someone's ears, and is refused while the send's level isn't known.
+ * @param {PointerEvent} e
+ */
+function onButtonDown(e)
+{
+	const button = this;
+	if(e.cancelable)
+	{
+		e.preventDefault();
+	}
+	cancelHold(button);
+
+	const aux = selectedAux();
+	const v = aux === undefined ? undefined : known.get(onAddress(button.dataset.channel, aux));
+	if(!canSend() || !v)
+	{
+		return;
+	}
+	if(v.value)
+	{
+		setSendOn(button, 0);
+		return;
+	}
+
+	const level = known.get(sliderAddress(channelInputs.get(button.dataset.channel), aux));
+	if(!level)
+	{
+		return;
+	}
+	button.classList.add("holding");
+	button.holdTimer = setTimeout(function()
+	{
+		button.holdTimer = null;
+		button.classList.remove("holding");
+		const now = known.get(onAddress(button.dataset.channel, aux));
+		if(canSend() && selectedAux() === aux && now && !now.value)
+		{
+			setSendOn(button, 1);
+		}
+	}, HOLD_TO_TURN_ON_MS);
+}
+
+/**
+ * Keyboard activation (Enter/Space) of an ON button is a deliberate action, so it toggles.
+ * Pointer presses are handled in onButtonDown.
+ * @param {MouseEvent} e
+ */
+function onButtonClick(e)
+{
+	e.preventDefault();
+	if(e.detail !== 0)
+	{
+		return;
+	}
+	const aux = selectedAux();
+	const v = aux === undefined ? undefined : known.get(onAddress(this.dataset.channel, aux));
+	const level = aux === undefined ? undefined : known.get(sliderAddress(channelInputs.get(this.dataset.channel), aux));
+	if(canSend() && v && (v.value || level))
+	{
+		setSendOn(this, v.value ? 0 : 1);
+	}
+}
+
+/**
+ * Create a channel's send on/off button
+ * @param {string|number} channel
+ * @returns {HTMLButtonElement}
+ */
+function createOnButton(channel)
+{
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "sendOn";
+	button.dataset.channel = channel;
+	const text = document.createElement("span");
+	text.textContent = "ON";
+	button.appendChild(text);
+	button.addEventListener("pointerdown", onButtonDown);
+	for(const type of ["pointerup", "pointercancel", "pointerleave"])
+	{
+		button.addEventListener(type, function() { cancelHold(this); });
+	}
+	button.addEventListener("click", onButtonClick);
+	button.addEventListener("contextmenu", e => e.preventDefault());
+	refreshOnButton(button);
+	return button;
+}
+
 function createFader(type, labelText, iconSrc, inputClass, changed)
 {
 	let label = document.createElement("label");
@@ -1382,6 +1562,11 @@ function buildChannels(channels, groups)
 	channelInputs = new Map();
 	panInputs = new Map();
 	groupInputs = new Map();
+	for(const button of onButtons.values())
+	{
+		cancelHold(button);
+	}
+	onButtons = new Map();
 	channelRows = new Map();
 	adminOrder = channels
 		.filter(channel => channel.enabled)
@@ -1440,6 +1625,13 @@ function buildChannels(channels, groups)
 			const { label, input } = createFader(type, channel.label, channel.icon, type == "volume" ? "volumeInput" : "panInput", channel.changed === true);
 			input.dataset.channel = channel.channel;
 			(type == "volume" ? channelInputs : panInputs).set(String(channel.channel), input);
+			if(type == "volume")
+			{
+				const button = createOnButton(channel.channel);
+				const row = label.querySelector(".faderRow");
+				row.insertBefore(button, row.firstChild);
+				onButtons.set(String(channel.channel), button);
+			}
 			wrap.appendChild(label);
 		}
 

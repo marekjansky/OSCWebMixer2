@@ -6,16 +6,30 @@ deployment. Everything else is covered by `npm test` and the mock desk.
 **Setup:** turn on Debug in `/admin` (server log shows every OSC message), keep `/admin` → Status open,
 and have at least two iPads connected, one of them locked to an aux. Tick each item and note the result.
 
-## 0. Unknowns to capture first
+## 0. Findings from the Quantum software (2026-11-22, Quantum3 offline on Windows)
 
-- [ ] **Aux send on/off address.** On the desk, switch one channel's send to one aux on and off. Copy the
-      `Message received over UDP: ...` lines. Needed before building the send ON button.
-- [ ] **Does the desk push renames?** Rename a channel on the desk and look for an unsolicited
-      `/Input_Channels/N/Channel_Input/name` message. Same for an aux name.
-- [ ] **Does the desk push structure changes?** Change the number of inputs/auxes or an aux's mono/stereo
-      mode. Look for `/Console/Input_Channels`, `/Console/Aux_Outputs/modes` or `/Console/Session/!`.
-- [ ] **Pan range.** Move a send pan fully left and right on the desk and check that the `send_pan` values
-      are 0 and 1. The server clamps pan to 0..1.
+Verified against the Quantum offline software (OSC Pad: receive 9000, send 8100):
+
+- **Send on/off is `/Input_Channels/{ch}/Aux_Send/{aux}/send_on`, a FLOAT 0 or 1.** Sending an OSC
+  *integer* 1 makes Quantum store 1.4e-45 (it reads the int bits as a float). The server sends every
+  number as a float (osc.js default), so this works; never send typed ints to the desk.
+- **Pan is 0..1 with centre 0.5** (default on mono and stereo auxes is 0.5; 0 and 1 are accepted).
+  Quantum does not clamp: it stores -1 if sent -1, so the server's 0..1 clamp matters.
+- Level is a float in dB (-150 = off).
+- `/Console/Channels/?` answers with all counts (inputs, auxes, groups, matrix, ...).
+- No snapshot loaded -> `/Snapshots/Current_Snapshot` is -1.
+- The software binds both its receive port AND its send port on 0.0.0.0. To test on the same PC,
+  bind the server (or a relay) to 127.0.0.1 on the send port; see the scratch relay approach.
+
+Still to check on a real desk / in Quantum:
+
+- [ ] **Does the desk push renames?** Rename a channel and an aux in Quantum and look for unsolicited
+      `/Input_Channels/N/Channel_Input/name` / `/Aux_Outputs/N/Buss_Trim/name` messages.
+- [ ] **Does the desk push structure changes?** Change the number of inputs/auxes or an aux's
+      mono/stereo mode. Look for `/Console/Input_Channels`, `/Console/Aux_Outputs/modes` or
+      `/Console/Session/!`.
+- [ ] **Does the desk push send on/off changes?** Switch a send on at the desk while a mixer shows that
+      aux: the ON button should light within a moment.
 - [ ] **Reply address.** With a desk that has two network ports, there should be no
       "Received desk messages … from X" warning. If there is, the desk replies from another IP.
 
@@ -76,6 +90,8 @@ and have at least two iPads connected, one of them locked to an aux. Tick each i
 - [ ] **Two fingers.** Drag two faders at once: both move, and lifting one doesn't affect the other.
 - [ ] **Double-tap.** A fast double-tap on one volume fader sends it to off. A double-tap with movement, a
       tap on two different faders, or a double-tap on a group fader does nothing.
+- [ ] **Send ON.** A short tap on an unlit ON button does nothing; press and hold (~0.6 s) lights it
+      and the desk send switches on; a single tap switches it off. A send that is off dims its fader.
 - [ ] **Resting finger.** Rest a finger on a fader without moving it: the desk level doesn't change.
 - [ ] **First step of a drag.** Check that a drag starts smoothly. If the first few % of travel are
       swallowed, iOS isn't delivering `touchmove` for range inputs.
