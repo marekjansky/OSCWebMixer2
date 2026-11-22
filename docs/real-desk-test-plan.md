@@ -21,13 +21,25 @@ Verified against the Quantum offline software (OSC Pad: receive 9000, send 8100)
 - The software binds both its receive port AND its send port on 0.0.0.0. To test on the same PC,
   bind the server (or a relay) to 127.0.0.1 on the send port; see the scratch relay approach.
 
+Also verified in Quantum:
+
+- **Renames are pushed live.** Renaming a channel or an aux sends
+  `/Input_Channels/N/Channel_Input/name` / `/Aux_Outputs/N/Buss_Trim/name` straight away, without a
+  query. The server flags the change (admin banner, mixer marker, locks on that aux suspended).
+- **A restructure sends `/Console/Session/!`.** While the engineer restructures, the desk stops
+  answering for a few seconds, so the server shows "desk not responding" briefly, then the session
+  message triggers a full reload without disconnecting anyone.
+- **Restructures renumber auxes.** Adding two stereo auxes kept the count at 16 (they used free aux
+  slots) but inserted them at 1 and 3, shifting every aux after them. "Follow the moved auxes" in the
+  admin banner moved the colour, icon, layout and a locked device of "Snare Long Verb" from aux 2 to
+  aux 4 in one click; the new auxes 1 and 3 started fresh.
+- **All sends ON / OFF for an aux** (admin) switched all 96 sends of an aux on and off; Quantum echoed
+  every one.
+- Aux names can start with a space (" Snare Short Verb"); names are compared ignoring extra spaces.
+- With 16 automatic colours, every aux gets a different one (two auxes shared a colour before).
+
 Still to check on a real desk / in Quantum:
 
-- [ ] **Does the desk push renames?** Rename a channel and an aux in Quantum and look for unsolicited
-      `/Input_Channels/N/Channel_Input/name` / `/Aux_Outputs/N/Buss_Trim/name` messages.
-- [ ] **Does the desk push structure changes?** Change the number of inputs/auxes or an aux's
-      mono/stereo mode. Look for `/Console/Input_Channels`, `/Console/Aux_Outputs/modes` or
-      `/Console/Session/!`.
 - [ ] **Does the desk push send on/off changes?** Switch a send on at the desk while a mixer shows that
       aux: the ON button should light within a moment.
 - [ ] **Reply address.** With a desk that has two network ports, there should be no
@@ -90,7 +102,7 @@ Still to check on a real desk / in Quantum:
 - [ ] **Two fingers.** Drag two faders at once: both move, and lifting one doesn't affect the other.
 - [ ] **Double-tap.** A fast double-tap on one volume fader sends it to off. A double-tap with movement, a
       tap on two different faders, or a double-tap on a group fader does nothing.
-- [ ] **Send ON.** A short tap on an unlit ON button does nothing; press and hold (~0.6 s) lights it
+- [ ] **Send ON.** A short tap on an unlit ON button does nothing; press and hold (~0.35 s) lights it
       and the desk send switches on; a single tap switches it off. A send that is off dims its fader.
 - [ ] **Resting finger.** Rest a finger on a fader without moving it: the desk level doesn't change.
 - [ ] **First step of a drag.** Check that a drag starts smoothly. If the first few % of travel are

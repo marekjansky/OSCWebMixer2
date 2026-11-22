@@ -695,3 +695,23 @@ select.channel-group {
 
 .changed-row { outline: 2px solid #e08a00; outline-offset: -2px; background: #fff4d6; }
 .changed-note { color:#b36b00; font-size:.85em; white-space:nowrap; }
+
+/* "All sends ON / OFF" per aux */
+.all-sends
+{
+	display: inline-flex;
+	gap: 6px;
+	margin-left: 10px;
+	white-space: nowrap;
+}
+
+.all-sends button
+{
+	padding: 4px 8px;
+	font-size: 12px;
+}
+
+.identity-follow
+{
+	font-weight: bold;
+}

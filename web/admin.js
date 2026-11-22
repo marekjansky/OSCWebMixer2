@@ -404,6 +404,19 @@ function createAux(number, enabled, name, colour, icon, previousName = null)
 
 	addIconPicker(auxWrap, "auxIcon[]", icon);
 
+	let sends = document.createElement("span");
+	sends.className = "all-sends";
+	for(const [text, on] of [["All sends ON", true], ["All OFF", false]])
+	{
+		let button = document.createElement("button");
+		button.type = "button";
+		button.textContent = text;
+		button.title = (on ? "Switch on" : "Switch off") + " the send of every enabled channel to this aux on the desk";
+		button.addEventListener("click", () => switchAllSends(number, auxName.value, on));
+		sends.appendChild(button);
+	}
+	auxWrap.appendChild(sends);
+
 	auxiliaries.appendChild(auxWrap);
 }
 
@@ -1437,12 +1450,35 @@ function renderIdentityChanges(changes)
 	title.textContent = "The desk reports changed names. Confirm what should happen to the settings:";
 	identityBanner.appendChild(title);
 
+	//auxes/channels that moved to another number (desk restructure): follow them all at once
+	for(const type of ["aux", "channel"])
+	{
+		const moved = changes.filter(change => change.type == type && change.movedFrom);
+		if(moved.length == 0)
+		{
+			continue;
+		}
+		const row = document.createElement("div");
+		row.className = "identity-change identity-follow";
+		const plural = type == "aux" ? (moved.length == 1 ? "aux" : "auxes") : (moved.length == 1 ? "channel" : "channels");
+		row.appendChild(document.createTextNode(moved.length + " " + plural + " moved to a different number on the desk. "));
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = "Follow the moved " + plural;
+		button.title = "Moves their colour, icon, settings, layouts" + (type == "aux" ? " and locked devices" : "") + " to the new numbers";
+		button.addEventListener("click", () => followMoves(type, row));
+		row.appendChild(button);
+		identityBanner.appendChild(row);
+	}
+
 	for(const change of changes)
 	{
 		const row = document.createElement("div");
 		row.className = "identity-change";
 		const label = change.type == "aux" ? "Aux" : "Channel";
-		row.appendChild(document.createTextNode(label + " " + change.number + " was '" + change.previousName + "', now '" + change.currentName + "'"));
+		row.appendChild(document.createTextNode(change.movedFrom
+			? label + " '" + change.currentName + "' moved from " + change.movedFrom + " to " + change.number + (change.previousName ? " (was '" + change.previousName + "')" : "")
+			: label + " " + change.number + " was '" + change.previousName + "', now '" + change.currentName + "'"));
 
 		for(const [text, keep] of [["Keep settings", true], ["Reset to defaults", false]])
 		{
@@ -1453,6 +1489,80 @@ function renderIdentityChanges(changes)
 			row.appendChild(button);
 		}
 		identityBanner.appendChild(row);
+	}
+}
+
+/**
+ * Follow every aux (or channel) that moved to another number on the desk
+ * @param {"aux"|"channel"} type
+ * @param {HTMLElement} row - banner row whose button is disabled while saving
+ */
+async function followMoves(type, row)
+{
+	for(const button of row.querySelectorAll("button"))
+	{
+		button.disabled = true;
+	}
+	try
+	{
+		const response = await apiFetch("/api/identity/follow", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ type })
+		});
+		if(!response.ok)
+		{
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.message || "Server answered " + response.status);
+		}
+		await pollStatus();
+		if(!formDirty)
+		{
+			reloadLists();
+		}
+	}
+	catch(err)
+	{
+		alert("Could not follow the moved " + type + "s: " + err.message);
+		for(const button of row.querySelectorAll("button"))
+		{
+			button.disabled = false;
+		}
+	}
+}
+
+/**
+ * Switch the send of every enabled channel to one aux on or off
+ * @param {number} aux
+ * @param {string} name - aux name, for the confirmation
+ * @param {boolean} on
+ */
+async function switchAllSends(aux, name, on)
+{
+	const enabledChannels = document.querySelectorAll('#channels input[type="hidden"][name="channelEnabled[]"][value="true"]').length;
+	const message = on
+		? "Switch ON the sends of all " + enabledChannels + " enabled channels to aux " + aux + " '" + name + "'?\n\nEvery channel whose send level is up will be heard in this mix straight away."
+		: "Switch OFF the sends of all " + enabledChannels + " enabled channels to aux " + aux + " '" + name + "'?\n\nThis mix will go silent.";
+	if(!confirm(message))
+	{
+		return;
+	}
+	try
+	{
+		const response = await apiFetch("/api/aux/" + aux + "/sends", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ on: on ? 1 : 0 })
+		});
+		if(!response.ok)
+		{
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.message || "Server answered " + response.status);
+		}
+	}
+	catch(err)
+	{
+		alert("Could not switch the sends: " + err.message);
 	}
 }
 
